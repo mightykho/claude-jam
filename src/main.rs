@@ -1,22 +1,23 @@
 use std::io;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::{Frame, Terminal};
 use rusqlite::Connection;
 
 const TICK_RATE: Duration = Duration::from_secs(1);
-const STALE_THRESHOLD_SECS: i64 = 300; // 5 minutes
+const STALE_THRESHOLD_SECS: i64 = 300;
 
 struct Session {
     session_id: String,
@@ -24,98 +25,45 @@ struct Session {
     tool_name: Option<String>,
     detail: Option<String>,
     cwd: Option<String>,
+    tmux_session: Option<String>,
     updated_at: String,
 }
 
-
 fn project_name(cwd: &Option<String>) -> String {
     cwd.as_deref()
-        .and_then(|p| {
-            std::path::Path::new(p)
-                .file_name()
-                .and_then(|f| f.to_str())
-        })
+        .and_then(|p| std::path::Path::new(p).file_name().and_then(|f| f.to_str()))
         .unwrap_or("?")
         .to_string()
 }
 
-fn status_color(status: &str) -> Color {
+fn status_emoji(status: &str, is_stale: bool) -> &'static str {
+    if is_stale {
+        return "💤";
+    }
+    match status {
+        "working" => "🔨",
+        "waiting" => "🔔",
+        "idle" => "⏸️ ",
+        _ => "❓",
+    }
+}
+
+fn status_color(status: &str, is_stale: bool) -> Color {
+    if is_stale {
+        return Color::Cyan;
+    }
     match status {
         "working" => Color::Green,
         "waiting" => Color::Yellow,
-        "idle" => Color::DarkGray,
-        _ => Color::DarkGray,
+        "idle" => Color::Gray,
+        _ => Color::Gray,
     }
 }
 
-fn relative_time(updated_at: &str) -> String {
-    // updated_at is in SQLite CURRENT_TIMESTAMP format: "YYYY-MM-DD HH:MM:SS"
-    // We'll parse it and compare to now (UTC)
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
-    // Parse the SQLite timestamp manually
-    let parts: Vec<&str> = updated_at.split(|c| c == '-' || c == ' ' || c == ':').collect();
-    if parts.len() < 6 {
-        return updated_at.to_string();
-    }
-
-    let (year, month, day, hour, min, sec) = match (
-        parts[0].parse::<i64>(),
-        parts[1].parse::<i64>(),
-        parts[2].parse::<i64>(),
-        parts[3].parse::<i64>(),
-        parts[4].parse::<i64>(),
-        parts[5].parse::<i64>(),
-    ) {
-        (Ok(y), Ok(mo), Ok(d), Ok(h), Ok(mi), Ok(s)) => (y, mo, d, h, mi, s),
-        _ => return updated_at.to_string(),
-    };
-
-    // Approximate unix timestamp (no leap seconds, but good enough)
-    let days_in_month: [i64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let mut total_days: i64 = 0;
-    for y in 1970..year {
-        total_days += if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
-            366
-        } else {
-            365
-        };
-    }
-    let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    for m in 0..(month - 1) as usize {
-        total_days += days_in_month[m];
-        if m == 1 && is_leap {
-            total_days += 1;
-        }
-    }
-    total_days += day - 1;
-    let ts = total_days * 86400 + hour * 3600 + min * 60 + sec;
-
-    let diff = now as i64 - ts;
-    if diff < 0 {
-        return "just now".to_string();
-    }
-    if diff < 60 {
-        format!("{}s ago", diff)
-    } else if diff < 3600 {
-        format!("{}m ago", diff / 60)
-    } else if diff < 86400 {
-        format!("{}h ago", diff / 3600)
-    } else {
-        format!("{}d ago", diff / 86400)
-    }
-}
-
-fn seconds_since(updated_at: &str) -> i64 {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-
-    let parts: Vec<&str> = updated_at.split(|c| c == '-' || c == ' ' || c == ':').collect();
+fn parse_timestamp(updated_at: &str) -> i64 {
+    let parts: Vec<&str> = updated_at
+        .split(|c| c == '-' || c == ' ' || c == ':')
+        .collect();
     if parts.len() < 6 {
         return 0;
     }
@@ -148,23 +96,43 @@ fn seconds_since(updated_at: &str) -> i64 {
         }
     }
     total_days += day - 1;
-    let ts = total_days * 86400 + hour * 3600 + min * 60 + sec;
-    now - ts
+    total_days * 86400 + hour * 3600 + min * 60 + sec
+}
+
+fn seconds_since(updated_at: &str) -> i64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    now - parse_timestamp(updated_at)
+}
+
+fn relative_time(updated_at: &str) -> String {
+    let diff = seconds_since(updated_at);
+    if diff < 0 {
+        return "just now".to_string();
+    }
+    if diff < 60 {
+        format!("{}s ago", diff)
+    } else if diff < 3600 {
+        format!("{}m ago", diff / 60)
+    } else if diff < 86400 {
+        format!("{}h ago", diff / 3600)
+    } else {
+        format!("{}d ago", diff / 86400)
+    }
 }
 
 fn db_path() -> PathBuf {
-    dirs_or_home().join(".claude").join("claude-jam.db")
-}
-
-fn dirs_or_home() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
+        .join(".claude")
+        .join("claude-jam.db")
 }
 
 fn open_db() -> rusqlite::Result<Connection> {
-    let path = db_path();
-    let conn = Connection::open(&path)?;
+    let conn = Connection::open(db_path())?;
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
          PRAGMA busy_timeout=3000;
@@ -174,6 +142,7 @@ fn open_db() -> rusqlite::Result<Connection> {
              tool_name TEXT,
              detail TEXT,
              cwd TEXT,
+             tmux_session TEXT,
              started_at DATETIME,
              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
          );",
@@ -184,7 +153,7 @@ fn open_db() -> rusqlite::Result<Connection> {
 fn fetch_sessions(conn: &Connection) -> Vec<Session> {
     let mut stmt = conn
         .prepare(
-            "SELECT session_id, status, tool_name, detail, cwd, updated_at
+            "SELECT session_id, status, tool_name, detail, cwd, tmux_session, updated_at
              FROM sessions
              WHERE status != 'offline'
              ORDER BY updated_at DESC",
@@ -198,7 +167,8 @@ fn fetch_sessions(conn: &Connection) -> Vec<Session> {
             tool_name: row.get(2)?,
             detail: row.get(3)?,
             cwd: row.get(4)?,
-            updated_at: row.get(5)?,
+            tmux_session: row.get(5)?,
+            updated_at: row.get(6)?,
         })
     })
     .unwrap()
@@ -208,6 +178,12 @@ fn fetch_sessions(conn: &Connection) -> Vec<Session> {
 
 fn delete_session(conn: &Connection, session_id: &str) {
     let _ = conn.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id]);
+}
+
+fn switch_tmux_session(session_name: &str) {
+    let _ = Command::new("tmux")
+        .args(["switch-client", "-t", session_name])
+        .status();
 }
 
 struct App {
@@ -230,90 +206,109 @@ impl App {
         }
     }
 
-    fn selected_session_id(&self) -> Option<&str> {
-        self.sessions.get(self.selected).map(|s| s.session_id.as_str())
+    fn selected_session(&self) -> Option<&Session> {
+        self.sessions.get(self.selected)
+    }
+
+    fn session_at_shortcut(&self, c: char) -> Option<usize> {
+        let idx = match c {
+            '1'..='9' => (c as usize) - ('1' as usize),
+            'a'..='z' => 9 + (c as usize) - ('a' as usize),
+            _ => return None,
+        };
+        if idx < self.sessions.len() {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+}
+
+fn shortcut_label(i: usize) -> String {
+    match i {
+        0..=8 => format!("{}", i + 1),
+        9..=34 => format!("{}", (b'a' + (i - 9) as u8) as char),
+        _ => " ".to_string(),
     }
 }
 
 fn ui(frame: &mut Frame, app: &App) {
     let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(frame.area());
 
-    render_table(frame, app, chunks[0]);
-    render_footer(frame, chunks[1]);
-}
+    let area = chunks[0];
+    let width = area.width.saturating_sub(4) as usize; // border + padding
 
-fn render_table(frame: &mut Frame, app: &App, area: Rect) {
-    let header = Row::new(vec![
-        Cell::from("Project").style(Style::default().add_modifier(Modifier::BOLD)),
-        Cell::from("Status").style(Style::default().add_modifier(Modifier::BOLD)),
-        Cell::from("Tool").style(Style::default().add_modifier(Modifier::BOLD)),
-        Cell::from("Detail").style(Style::default().add_modifier(Modifier::BOLD)),
-        Cell::from("Last Update").style(Style::default().add_modifier(Modifier::BOLD)),
-    ])
-    .height(1);
-
-    let detail_width = area.width.saturating_sub(12 + 10 + 18 + 12 + 8) as usize;
-
-    let rows: Vec<Row> = app
+    let items: Vec<ListItem> = app
         .sessions
         .iter()
         .enumerate()
         .map(|(i, s)| {
             let is_stale = seconds_since(&s.updated_at) > STALE_THRESHOLD_SECS;
-            let style = if is_stale {
-                Style::default().fg(Color::DarkGray)
+            let emoji = status_emoji(&s.status, is_stale);
+            let color = status_color(&s.status, is_stale);
+            let project = project_name(&s.cwd);
+            let time = relative_time(&s.updated_at);
+            let tmux = s
+                .tmux_session
+                .as_deref()
+                .filter(|t| !t.is_empty())
+                .map(|t| format!(" [{}]", t))
+                .unwrap_or_default();
+
+            // Line 1: shortcut + emoji + project name + tmux session + time
+            let label = shortcut_label(i);
+            let header_line = Line::from(vec![
+                Span::styled(format!("{} ", label), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{} ", emoji), Style::default()),
+                Span::styled(
+                    format!("{}{}", project, tmux),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("  {}", time), Style::default().fg(Color::Gray)),
+            ]);
+
+            // Line 2: tool + detail (show "Done" for idle sessions)
+            let tool = if s.status == "idle" {
+                ""
             } else {
-                Style::default()
+                s.tool_name.as_deref().unwrap_or("")
+            };
+            let detail = if s.status == "idle" {
+                "Done"
+            } else {
+                s.detail.as_deref().unwrap_or("")
+            };
+            let max_detail = width.saturating_sub(tool.len() + 6); // "  ├ " + tool + " "
+            let detail_truncated = if detail.len() > max_detail {
+                format!("{}…", &detail[..max_detail.saturating_sub(1)])
+            } else {
+                detail.to_string()
             };
 
-            let status_display = if is_stale {
-                "stale".to_string()
-            } else {
-                s.status.clone()
-            };
+            let detail_line = Line::from(vec![
+                Span::styled("  ├ ", Style::default().fg(Color::Gray)),
+                Span::styled(tool.to_string(), Style::default().fg(Color::LightBlue)),
+                Span::styled(" ", Style::default()),
+                Span::styled(detail_truncated, Style::default().fg(Color::Gray)),
+            ]);
 
-            let detail_str = s.detail.as_deref().unwrap_or("");
-            let detail_truncated: String = if detail_str.len() > detail_width {
-                format!("{}...", &detail_str[..detail_width.saturating_sub(3)])
+            if i == app.selected {
+                ListItem::new(vec![header_line, detail_line])
+                    .style(Style::default().bg(Color::DarkGray).fg(Color::White))
             } else {
-                detail_str.to_string()
-            };
-
-            let row_style = if i == app.selected {
-                style.add_modifier(Modifier::REVERSED)
-            } else {
-                style
-            };
-
-            Row::new(vec![
-                Cell::from(project_name(&s.cwd)),
-                Cell::from(status_display).style(Style::default().fg(status_color(&s.status))),
-                Cell::from(s.tool_name.as_deref().unwrap_or("")),
-                Cell::from(detail_truncated),
-                Cell::from(relative_time(&s.updated_at)),
-            ])
-            .style(row_style)
+                ListItem::new(vec![header_line, detail_line])
+            }
         })
         .collect();
 
-    let widths = [
-        Constraint::Length(12),
-        Constraint::Length(10),
-        Constraint::Length(18),
-        Constraint::Fill(1),
-        Constraint::Length(12),
-    ];
+    let list = List::new(items).block(
+        Block::default()
+            .title(" Claude Jam ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
 
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(
-            Block::default()
-                .title(" Claude Jam ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan)),
-        );
-
-    frame.render_widget(table, area);
+    frame.render_widget(list, area);
 
     if app.sessions.is_empty() {
         let msg = Paragraph::new("No active sessions")
@@ -325,23 +320,27 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
         });
         frame.render_widget(msg, inner);
     }
-}
 
-fn render_footer(frame: &mut Frame, area: Rect) {
+    // Footer
     let footer = Line::from(vec![
-        Span::raw(" q").bold(),
-        Span::raw(" quit  "),
-        Span::raw("j/k").bold(),
+        Span::raw(" 1-9/a-z").bold(),
+        Span::raw(" jump  "),
+        Span::raw("↑↓").bold(),
         Span::raw(" navigate  "),
-        Span::raw("d").bold(),
-        Span::raw(" delete stale  "),
+        Span::raw("Enter").bold(),
+        Span::raw(" switch  "),
+        Span::raw("C-d").bold(),
+        Span::raw(" delete  "),
+        Span::raw("C-q").bold(),
+        Span::raw(" quit  "),
     ])
     .style(Style::default().fg(Color::DarkGray));
 
-    frame.render_widget(Paragraph::new(footer), area);
+    frame.render_widget(Paragraph::new(footer), chunks[1]);
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let quit_on_select = std::env::args().any(|a| a == "-q" || a == "--quit");
     let conn = open_db()?;
 
     enable_raw_mode()?;
@@ -361,14 +360,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
+                    // Helper closure for tmux switching
+                    let switch = |idx: usize,
+                                  terminal: &mut Terminal<CrosstermBackend<io::Stdout>>|
+                     -> Result<(), Box<dyn std::error::Error>> {
+                        if let Some(session) = app.sessions.get(idx) {
+                            if let Some(ref tmux) = session.tmux_session {
+                                if !tmux.is_empty() {
+                                    disable_raw_mode()?;
+                                    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+                                    terminal.show_cursor()?;
+                                    switch_tmux_session(tmux);
+                                    enable_raw_mode()?;
+                                    execute!(io::stdout(), EnterAlternateScreen)?;
+                                }
+                            }
+                        }
+                        Ok(())
+                    };
+
+                    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                     match key.code {
-                        KeyCode::Char('q') => break,
-                        KeyCode::Char('j') | KeyCode::Down => {
+                        KeyCode::Char('q') if ctrl => break,
+                        KeyCode::Esc => break,
+                        KeyCode::Down => {
                             if !app.sessions.is_empty() {
                                 app.selected = (app.selected + 1) % app.sessions.len();
                             }
                         }
-                        KeyCode::Char('k') | KeyCode::Up => {
+                        KeyCode::Char('j') if ctrl => {
+                            if !app.sessions.is_empty() {
+                                app.selected = (app.selected + 1) % app.sessions.len();
+                            }
+                        }
+                        KeyCode::Up => {
                             if !app.sessions.is_empty() {
                                 app.selected = if app.selected == 0 {
                                     app.sessions.len() - 1
@@ -377,11 +402,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 };
                             }
                         }
-                        KeyCode::Char('d') => {
-                            if let Some(id) = app.selected_session_id() {
-                                let id = id.to_string();
+                        KeyCode::Char('k') if ctrl => {
+                            if !app.sessions.is_empty() {
+                                app.selected = if app.selected == 0 {
+                                    app.sessions.len() - 1
+                                } else {
+                                    app.selected - 1
+                                };
+                            }
+                        }
+                        KeyCode::Enter => {
+                            switch(app.selected, &mut terminal)?;
+                            if quit_on_select {
+                                break;
+                            }
+                            terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+                        }
+                        KeyCode::Char('d') if ctrl => {
+                            if let Some(session) = app.selected_session() {
+                                let id = session.session_id.clone();
                                 delete_session(&conn, &id);
                                 app.refresh(&conn);
+                            }
+                        }
+                        KeyCode::Char(c) if !ctrl => {
+                            if let Some(idx) = app.session_at_shortcut(c) {
+                                app.selected = idx;
+                                switch(idx, &mut terminal)?;
+                                if quit_on_select {
+                                    break;
+                                }
+                                terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
                             }
                         }
                         _ => {}
