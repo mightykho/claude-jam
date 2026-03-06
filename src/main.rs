@@ -213,13 +213,16 @@ fn cmd_topic(conn: &Connection, text: &str) {
     println!("Topic set for session in '{}'", tmux);
 }
 
-fn cmd_init(conn: &Connection, topic: &str) {
-    let tmux = match current_tmux_session() {
-        Some(t) => t,
-        None => {
-            eprintln!("Error: not in a tmux session");
-            std::process::exit(1);
-        }
+fn cmd_init(conn: &Connection, tmux_override: Option<&str>, topic: &str) {
+    let tmux = match tmux_override {
+        Some(t) => t.to_string(),
+        None => match current_tmux_session() {
+            Some(t) => t,
+            None => {
+                eprintln!("Error: not in a tmux session and no -s flag provided");
+                std::process::exit(1);
+            }
+        },
     };
     let placeholder_id = format!("tmux:{}", tmux);
     conn.execute(
@@ -795,7 +798,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Usage:");
         println!("  cj                   Launch TUI dashboard");
         println!("  cj -q                Launch TUI, quit after selecting a session");
-        println!("  cj init <topic>      Pre-register session with topic (before Claude starts)");
+        println!("  cj init [-s name] <topic>  Pre-register session with topic (-s for explicit tmux session)");
         println!("  cj topic <text>      Set topic for current session");
         println!("  cj milestone <text>  Add milestone to current session");
         println!("  cj hook              Process hook event from stdin (used by claude-jam.sh)");
@@ -816,12 +819,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cmd_hook(&conn);
         }
         Some("init") => {
-            let text = args[2..].join(" ");
+            let rest = &args[2..];
+            let (tmux_override, topic_args) = if rest.len() >= 2 && rest[0] == "-s" {
+                (Some(rest[1].as_str()), &rest[2..])
+            } else {
+                (None, rest)
+            };
+            let text = topic_args.join(" ");
             if text.is_empty() {
-                eprintln!("Usage: cj init <topic>");
+                eprintln!("Usage: cj init [-s <tmux-session>] <topic>");
                 std::process::exit(1);
             }
-            cmd_init(&conn, &text);
+            cmd_init(&conn, tmux_override, &text);
         }
         Some("topic") => {
             let text = args[2..].join(" ");
