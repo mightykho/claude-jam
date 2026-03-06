@@ -591,30 +591,6 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
                     Span::styled(ms_display, Style::default().fg(Color::Gray)),
                     Span::styled(format!("  {}", ms_time), Style::default().fg(Color::DarkGray)),
                 ]));
-            } else {
-                // No milestones — show tool+detail
-                let tool = if s.status == "idle" {
-                    ""
-                } else {
-                    s.tool_name.as_deref().unwrap_or("")
-                };
-                let detail = if s.status == "idle" {
-                    "Done"
-                } else {
-                    s.detail.as_deref().unwrap_or("")
-                };
-                let max_detail = width.saturating_sub(tool.len() + 6);
-                let detail_truncated = if detail.len() > max_detail {
-                    format!("{}…", &detail[..max_detail.saturating_sub(1)])
-                } else {
-                    detail.to_string()
-                };
-                lines.push(Line::from(vec![
-                    Span::styled("  ├ ", Style::default().fg(Color::Gray)),
-                    Span::styled(tool.to_string(), Style::default().fg(Color::LightBlue)),
-                    Span::styled(" ", Style::default()),
-                    Span::styled(detail_truncated, Style::default().fg(Color::Gray)),
-                ]));
             }
 
             // Expanded milestones (all except latest)
