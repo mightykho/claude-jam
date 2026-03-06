@@ -368,7 +368,7 @@ fn fetch_sessions(conn: &Connection) -> Vec<Session> {
             "SELECT session_id, status, tool_name, detail, cwd, tmux_session, topic, updated_at
              FROM sessions
              WHERE status != 'offline'
-             ORDER BY updated_at DESC",
+             ORDER BY started_at DESC",
         )
         .unwrap();
 
