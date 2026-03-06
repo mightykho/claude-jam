@@ -26,6 +26,7 @@ struct Session {
     status: String,
     tool_name: Option<String>,
     detail: Option<String>,
+    #[allow(dead_code)]
     cwd: Option<String>,
     tmux_session: Option<String>,
     topic: Option<String>,
@@ -35,13 +36,6 @@ struct Session {
 struct Milestone {
     summary: String,
     created_at: String,
-}
-
-fn project_name(cwd: &Option<String>) -> String {
-    cwd.as_deref()
-        .and_then(|p| std::path::Path::new(p).file_name().and_then(|f| f.to_str()))
-        .unwrap_or("?")
-        .to_string()
 }
 
 fn status_emoji(status: &str, is_stale: bool) -> &'static str {
@@ -517,14 +511,13 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
             let is_stale = seconds_since(&s.updated_at) > STALE_THRESHOLD_SECS;
             let emoji = status_emoji(&s.status, is_stale);
             let color = status_color(&s.status, is_stale);
-            let project = project_name(&s.cwd);
             let time = relative_time(&s.updated_at);
             let tmux = s
                 .tmux_session
                 .as_deref()
                 .filter(|t| !t.is_empty())
-                .map(|t| format!(" [{}]", t))
-                .unwrap_or_default();
+                .unwrap_or("?")
+                .to_string();
 
             let label = shortcut_label(i);
             let mut lines = vec![];
@@ -534,7 +527,7 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
                 Span::styled(format!("{} ", label), Style::default().fg(Color::Cyan)),
                 Span::styled(format!("{} ", emoji), Style::default()),
                 Span::styled(
-                    format!("{}{}", project, tmux),
+                    tmux.trim().to_string(),
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(format!("  {}", time), Style::default().fg(Color::Gray)),
@@ -551,7 +544,7 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
                 } else {
                     detail.to_string()
                 };
-                let max_activity = width.saturating_sub(label.len() + 2 + emoji.len() + 1 + project.len() + tmux.len() + 2 + time.len() + 5);
+                let max_activity = width.saturating_sub(label.len() + 2 + emoji.len() + 1 + tmux.len() + 2 + time.len() + 5);
                 let activity_display = if activity.len() > max_activity {
                     format!("{}…", &activity[..max_activity.saturating_sub(1)])
                 } else {
