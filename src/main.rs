@@ -549,7 +549,7 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
                 };
                 lines.push(Line::from(vec![
                     Span::styled("  │ ", Style::default().fg(Color::Gray)),
-                    Span::styled(topic_display, Style::default().fg(Color::DarkGray)),
+                    Span::styled(topic_display, Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
                 ]));
             }
 
