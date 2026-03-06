@@ -43,7 +43,7 @@ fn status_emoji(status: &str, is_stale: bool) -> &'static str {
     match status {
         "working" => "🔨",
         "waiting" => "🔔",
-        "idle" => "⏸️ ",
+        "idle" => "✅",
         _ => "❓",
     }
 }
@@ -210,17 +210,20 @@ impl App {
         self.sessions.get(self.selected)
     }
 
-    fn session_at_shortcut(&self, c: char) -> Option<usize> {
+    fn session_at_number(&self, c: char) -> Option<usize> {
         let idx = match c {
             '1'..='9' => (c as usize) - ('1' as usize),
+            _ => return None,
+        };
+        if idx < self.sessions.len() { Some(idx) } else { None }
+    }
+
+    fn session_at_ctrl_letter(&self, c: char) -> Option<usize> {
+        let idx = match c {
             'a'..='z' => 9 + (c as usize) - ('a' as usize),
             _ => return None,
         };
-        if idx < self.sessions.len() {
-            Some(idx)
-        } else {
-            None
-        }
+        if idx < self.sessions.len() { Some(idx) } else { None }
     }
 }
 
@@ -323,15 +326,15 @@ fn ui(frame: &mut Frame, app: &App) {
 
     // Footer
     let footer = Line::from(vec![
-        Span::raw(" 1-9/a-z").bold(),
+        Span::raw(" 1-9/C-a..z").bold(),
         Span::raw(" jump  "),
-        Span::raw("↑↓").bold(),
+        Span::raw("j/k").bold(),
         Span::raw(" navigate  "),
         Span::raw("Enter").bold(),
         Span::raw(" switch  "),
-        Span::raw("C-d").bold(),
+        Span::raw("d").bold(),
         Span::raw(" delete  "),
-        Span::raw("C-q").bold(),
+        Span::raw("q").bold(),
         Span::raw(" quit  "),
     ])
     .style(Style::default().fg(Color::DarkGray));
@@ -381,29 +384,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                     match key.code {
-                        KeyCode::Char('q') if ctrl => break,
+                        KeyCode::Char('q') if !ctrl => break,
                         KeyCode::Esc => break,
-                        KeyCode::Down => {
-                            if !app.sessions.is_empty() {
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            if !ctrl && !app.sessions.is_empty() {
                                 app.selected = (app.selected + 1) % app.sessions.len();
                             }
                         }
-                        KeyCode::Char('j') if ctrl => {
-                            if !app.sessions.is_empty() {
-                                app.selected = (app.selected + 1) % app.sessions.len();
-                            }
-                        }
-                        KeyCode::Up => {
-                            if !app.sessions.is_empty() {
-                                app.selected = if app.selected == 0 {
-                                    app.sessions.len() - 1
-                                } else {
-                                    app.selected - 1
-                                };
-                            }
-                        }
-                        KeyCode::Char('k') if ctrl => {
-                            if !app.sessions.is_empty() {
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            if !ctrl && !app.sessions.is_empty() {
                                 app.selected = if app.selected == 0 {
                                     app.sessions.len() - 1
                                 } else {
@@ -418,15 +407,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
                         }
-                        KeyCode::Char('d') if ctrl => {
+                        KeyCode::Char('d') if !ctrl => {
                             if let Some(session) = app.selected_session() {
                                 let id = session.session_id.clone();
                                 delete_session(&conn, &id);
                                 app.refresh(&conn);
                             }
                         }
-                        KeyCode::Char(c) if !ctrl => {
-                            if let Some(idx) = app.session_at_shortcut(c) {
+                        KeyCode::Char(c @ '1'..='9') if !ctrl => {
+                            if let Some(idx) = app.session_at_number(c) {
+                                app.selected = idx;
+                                switch(idx, &mut terminal)?;
+                                if quit_on_select {
+                                    break;
+                                }
+                                terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+                            }
+                        }
+                        KeyCode::Char(c) if ctrl => {
+                            if let Some(idx) = app.session_at_ctrl_letter(c) {
                                 app.selected = idx;
                                 switch(idx, &mut terminal)?;
                                 if quit_on_select {
