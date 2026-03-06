@@ -26,7 +26,13 @@ struct Session {
     detail: Option<String>,
     cwd: Option<String>,
     tmux_session: Option<String>,
+    topic: Option<String>,
     updated_at: String,
+}
+
+struct Milestone {
+    summary: String,
+    created_at: String,
 }
 
 fn project_name(cwd: &Option<String>) -> String {
@@ -143,17 +149,93 @@ fn open_db() -> rusqlite::Result<Connection> {
              detail TEXT,
              cwd TEXT,
              tmux_session TEXT,
+             topic TEXT,
              started_at DATETIME,
              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+         );
+         CREATE TABLE IF NOT EXISTS milestones (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             session_id TEXT NOT NULL,
+             summary TEXT NOT NULL,
+             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+             FOREIGN KEY (session_id) REFERENCES sessions(session_id)
          );",
     )?;
+    // Migrations for existing DBs
+    let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN topic TEXT;");
     Ok(conn)
+}
+
+fn current_tmux_session() -> Option<String> {
+    Command::new("tmux")
+        .args(["display-message", "-p", "#S"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if s.is_empty() { None } else { Some(s) }
+        })
+}
+
+fn find_session_by_tmux(conn: &Connection, tmux_name: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT session_id FROM sessions WHERE tmux_session = ?1 AND status != 'offline' ORDER BY updated_at DESC LIMIT 1",
+        [tmux_name],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+fn cmd_topic(conn: &Connection, text: &str) {
+    let tmux = match current_tmux_session() {
+        Some(t) => t,
+        None => {
+            eprintln!("Error: not in a tmux session");
+            std::process::exit(1);
+        }
+    };
+    let session_id = match find_session_by_tmux(&conn, &tmux) {
+        Some(id) => id,
+        None => {
+            eprintln!("Error: no active session found for tmux session '{}'", tmux);
+            std::process::exit(1);
+        }
+    };
+    conn.execute(
+        "UPDATE sessions SET topic = ?1 WHERE session_id = ?2",
+        rusqlite::params![text, session_id],
+    )
+    .unwrap();
+    println!("Topic set for session in '{}'", tmux);
+}
+
+fn cmd_milestone(conn: &Connection, text: &str) {
+    let tmux = match current_tmux_session() {
+        Some(t) => t,
+        None => {
+            eprintln!("Error: not in a tmux session");
+            std::process::exit(1);
+        }
+    };
+    let session_id = match find_session_by_tmux(&conn, &tmux) {
+        Some(id) => id,
+        None => {
+            eprintln!("Error: no active session found for tmux session '{}'", tmux);
+            std::process::exit(1);
+        }
+    };
+    conn.execute(
+        "INSERT INTO milestones (session_id, summary) VALUES (?1, ?2)",
+        rusqlite::params![session_id, text],
+    )
+    .unwrap();
+    println!("Milestone added for session in '{}'", tmux);
 }
 
 fn fetch_sessions(conn: &Connection) -> Vec<Session> {
     let mut stmt = conn
         .prepare(
-            "SELECT session_id, status, tool_name, detail, cwd, tmux_session, updated_at
+            "SELECT session_id, status, tool_name, detail, cwd, tmux_session, topic, updated_at
              FROM sessions
              WHERE status != 'offline'
              ORDER BY updated_at DESC",
@@ -168,7 +250,38 @@ fn fetch_sessions(conn: &Connection) -> Vec<Session> {
             detail: row.get(3)?,
             cwd: row.get(4)?,
             tmux_session: row.get(5)?,
-            updated_at: row.get(6)?,
+            topic: row.get(6)?,
+            updated_at: row.get(7)?,
+        })
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
+}
+
+fn fetch_latest_milestone(conn: &Connection, session_id: &str) -> Option<Milestone> {
+    conn.query_row(
+        "SELECT summary, created_at FROM milestones WHERE session_id = ?1 ORDER BY created_at DESC LIMIT 1",
+        [session_id],
+        |row| {
+            Ok(Milestone {
+                summary: row.get(0)?,
+                created_at: row.get(1)?,
+            })
+        },
+    )
+    .ok()
+}
+
+fn fetch_milestones(conn: &Connection, session_id: &str) -> Vec<Milestone> {
+    let mut stmt = conn
+        .prepare("SELECT summary, created_at FROM milestones WHERE session_id = ?1 ORDER BY created_at DESC")
+        .unwrap();
+
+    stmt.query_map([session_id], |row| {
+        Ok(Milestone {
+            summary: row.get(0)?,
+            created_at: row.get(1)?,
         })
     })
     .unwrap()
@@ -177,6 +290,7 @@ fn fetch_sessions(conn: &Connection) -> Vec<Session> {
 }
 
 fn delete_session(conn: &Connection, session_id: &str) {
+    let _ = conn.execute("DELETE FROM milestones WHERE session_id = ?1", [session_id]);
     let _ = conn.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id]);
 }
 
@@ -189,6 +303,7 @@ fn switch_tmux_session(session_name: &str) {
 struct App {
     sessions: Vec<Session>,
     selected: usize,
+    expanded: Option<usize>, // index of session with milestones expanded
 }
 
 impl App {
@@ -196,6 +311,7 @@ impl App {
         Self {
             sessions: Vec::new(),
             selected: 0,
+            expanded: None,
         }
     }
 
@@ -210,12 +326,24 @@ impl App {
         self.sessions.get(self.selected)
     }
 
+    fn toggle_expand(&mut self) {
+        if self.expanded == Some(self.selected) {
+            self.expanded = None;
+        } else {
+            self.expanded = Some(self.selected);
+        }
+    }
+
     fn session_at_number(&self, c: char) -> Option<usize> {
         let idx = match c {
             '1'..='9' => (c as usize) - ('1' as usize),
             _ => return None,
         };
-        if idx < self.sessions.len() { Some(idx) } else { None }
+        if idx < self.sessions.len() {
+            Some(idx)
+        } else {
+            None
+        }
     }
 
     fn session_at_ctrl_letter(&self, c: char) -> Option<usize> {
@@ -223,7 +351,11 @@ impl App {
             'a'..='z' => 9 + (c as usize) - ('a' as usize),
             _ => return None,
         };
-        if idx < self.sessions.len() { Some(idx) } else { None }
+        if idx < self.sessions.len() {
+            Some(idx)
+        } else {
+            None
+        }
     }
 }
 
@@ -235,11 +367,11 @@ fn shortcut_label(i: usize) -> String {
     }
 }
 
-fn ui(frame: &mut Frame, app: &App) {
+fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
     let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(frame.area());
 
     let area = chunks[0];
-    let width = area.width.saturating_sub(4) as usize; // border + padding
+    let width = area.width.saturating_sub(4) as usize;
 
     let items: Vec<ListItem> = app
         .sessions
@@ -258,9 +390,11 @@ fn ui(frame: &mut Frame, app: &App) {
                 .map(|t| format!(" [{}]", t))
                 .unwrap_or_default();
 
-            // Line 1: shortcut + emoji + project name + tmux session + time
             let label = shortcut_label(i);
-            let header_line = Line::from(vec![
+            let mut lines = vec![];
+
+            // Line 1: shortcut + emoji + project name + tmux session + time
+            lines.push(Line::from(vec![
                 Span::styled(format!("{} ", label), Style::default().fg(Color::Cyan)),
                 Span::styled(format!("{} ", emoji), Style::default()),
                 Span::styled(
@@ -268,38 +402,99 @@ fn ui(frame: &mut Frame, app: &App) {
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(format!("  {}", time), Style::default().fg(Color::Gray)),
-            ]);
+            ]));
 
-            // Line 2: tool + detail (show "Done" for idle sessions)
-            let tool = if s.status == "idle" {
-                ""
-            } else {
-                s.tool_name.as_deref().unwrap_or("")
-            };
-            let detail = if s.status == "idle" {
-                "Done"
-            } else {
-                s.detail.as_deref().unwrap_or("")
-            };
-            let max_detail = width.saturating_sub(tool.len() + 6); // "  ├ " + tool + " "
-            let detail_truncated = if detail.len() > max_detail {
-                format!("{}…", &detail[..max_detail.saturating_sub(1)])
-            } else {
-                detail.to_string()
-            };
+            // Line 2: topic or tool+detail
+            let latest_milestone = fetch_latest_milestone(conn, &s.session_id);
 
-            let detail_line = Line::from(vec![
-                Span::styled("  ├ ", Style::default().fg(Color::Gray)),
-                Span::styled(tool.to_string(), Style::default().fg(Color::LightBlue)),
-                Span::styled(" ", Style::default()),
-                Span::styled(detail_truncated, Style::default().fg(Color::Gray)),
-            ]);
+            if let Some(ref topic) = s.topic {
+                let max_topic = width.saturating_sub(4);
+                let topic_display = if topic.len() > max_topic {
+                    format!("{}…", &topic[..max_topic.saturating_sub(1)])
+                } else {
+                    topic.clone()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("  │ ", Style::default().fg(Color::Gray)),
+                    Span::styled(topic_display, Style::default().fg(Color::White)),
+                ]));
+            }
+
+            // Line 3: latest milestone or tool+detail
+            if let Some(ref ms) = latest_milestone {
+                let ms_time = relative_time(&ms.created_at);
+                let prefix = if s.topic.is_some() { "  ├ " } else { "  │ " };
+                let max_ms = width.saturating_sub(ms_time.len() + 8);
+                let ms_display = if ms.summary.len() > max_ms {
+                    format!("{}…", &ms.summary[..max_ms.saturating_sub(1)])
+                } else {
+                    ms.summary.clone()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, Style::default().fg(Color::Gray)),
+                    Span::styled("⚑ ", Style::default().fg(Color::Magenta)),
+                    Span::styled(ms_display, Style::default().fg(Color::Gray)),
+                    Span::styled(format!("  {}", ms_time), Style::default().fg(Color::DarkGray)),
+                ]));
+            } else {
+                // No milestones — show tool+detail
+                let tool = if s.status == "idle" {
+                    ""
+                } else {
+                    s.tool_name.as_deref().unwrap_or("")
+                };
+                let detail = if s.status == "idle" {
+                    "Done"
+                } else {
+                    s.detail.as_deref().unwrap_or("")
+                };
+                let max_detail = width.saturating_sub(tool.len() + 6);
+                let detail_truncated = if detail.len() > max_detail {
+                    format!("{}…", &detail[..max_detail.saturating_sub(1)])
+                } else {
+                    detail.to_string()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("  ├ ", Style::default().fg(Color::Gray)),
+                    Span::styled(tool.to_string(), Style::default().fg(Color::LightBlue)),
+                    Span::styled(" ", Style::default()),
+                    Span::styled(detail_truncated, Style::default().fg(Color::Gray)),
+                ]));
+            }
+
+            // Expanded milestones (all except latest)
+            if app.expanded == Some(i) {
+                let all_milestones = fetch_milestones(conn, &s.session_id);
+                for (mi, ms) in all_milestones.iter().enumerate().skip(1) {
+                    let ms_time = relative_time(&ms.created_at);
+                    let max_ms = width.saturating_sub(ms_time.len() + 10);
+                    let ms_display = if ms.summary.len() > max_ms {
+                        format!("{}…", &ms.summary[..max_ms.saturating_sub(1)])
+                    } else {
+                        ms.summary.clone()
+                    };
+                    let connector = if mi == all_milestones.len() - 1 {
+                        "  └ "
+                    } else {
+                        "  ├ "
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(connector, Style::default().fg(Color::Gray)),
+                        Span::styled("⚑ ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(ms_display, Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            format!("  {}", ms_time),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]));
+                }
+            }
 
             if i == app.selected {
-                ListItem::new(vec![header_line, detail_line])
-                    .style(Style::default().bg(Color::DarkGray).fg(Color::White))
+                ListItem::new(lines)
+                    .style(Style::default().bg(Color::Black).fg(Color::White))
             } else {
-                ListItem::new(vec![header_line, detail_line])
+                ListItem::new(lines)
             }
         })
         .collect();
@@ -330,6 +525,8 @@ fn ui(frame: &mut Frame, app: &App) {
         Span::raw(" jump  "),
         Span::raw("j/k").bold(),
         Span::raw(" navigate  "),
+        Span::raw("o").bold(),
+        Span::raw(" expand  "),
         Span::raw("Enter").bold(),
         Span::raw(" switch  "),
         Span::raw("d").bold(),
@@ -342,10 +539,7 @@ fn ui(frame: &mut Frame, app: &App) {
     frame.render_widget(Paragraph::new(footer), chunks[1]);
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let quit_on_select = std::env::args().any(|a| a == "-q" || a == "--quit");
-    let conn = open_db()?;
-
+fn run_tui(conn: &Connection, quit_on_select: bool) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -353,17 +547,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new();
-    app.refresh(&conn);
+    app.refresh(conn);
     let mut last_tick = Instant::now();
 
     loop {
-        terminal.draw(|f| ui(f, &app))?;
+        terminal.draw(|f| ui(f, &app, conn))?;
 
         let timeout = TICK_RATE.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    // Helper closure for tmux switching
                     let switch = |idx: usize,
                                   terminal: &mut Terminal<CrosstermBackend<io::Stdout>>|
                      -> Result<(), Box<dyn std::error::Error>> {
@@ -400,6 +593,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 };
                             }
                         }
+                        KeyCode::Char('o') if !ctrl => {
+                            app.toggle_expand();
+                        }
                         KeyCode::Enter => {
                             switch(app.selected, &mut terminal)?;
                             if quit_on_select {
@@ -410,8 +606,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('d') if !ctrl => {
                             if let Some(session) = app.selected_session() {
                                 let id = session.session_id.clone();
-                                delete_session(&conn, &id);
-                                app.refresh(&conn);
+                                delete_session(conn, &id);
+                                app.refresh(conn);
                             }
                         }
                         KeyCode::Char(c @ '1'..='9') if !ctrl => {
@@ -441,7 +637,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if last_tick.elapsed() >= TICK_RATE {
-            app.refresh(&conn);
+            app.refresh(conn);
             last_tick = Instant::now();
         }
     }
@@ -449,6 +645,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
+
+    Ok(())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+    let conn = open_db()?;
+
+    match args.get(1).map(|s| s.as_str()) {
+        Some("topic") => {
+            let text = args[2..].join(" ");
+            if text.is_empty() {
+                eprintln!("Usage: cj topic <description>");
+                std::process::exit(1);
+            }
+            cmd_topic(&conn, &text);
+        }
+        Some("milestone") => {
+            let text = args[2..].join(" ");
+            if text.is_empty() {
+                eprintln!("Usage: cj milestone <description>");
+                std::process::exit(1);
+            }
+            cmd_milestone(&conn, &text);
+        }
+        _ => {
+            let quit_on_select = args.iter().any(|a| a == "-q" || a == "--quit");
+            run_tui(&conn, quit_on_select)?;
+        }
+    }
 
     Ok(())
 }
