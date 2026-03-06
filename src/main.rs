@@ -1,7 +1,9 @@
-use std::io;
+use std::io::{self, Read as _};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
+
+use serde::Deserialize;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -228,6 +230,116 @@ fn cmd_init(conn: &Connection, topic: &str) {
     )
     .unwrap();
     println!("Session initialized in '{}' with topic: {}", tmux, topic);
+}
+
+#[derive(Deserialize, Default)]
+struct HookInput {
+    session_id: Option<String>,
+    hook_event_name: Option<String>,
+    tool_name: Option<String>,
+    tool_input: Option<serde_json::Value>,
+    cwd: Option<String>,
+    prompt: Option<String>,
+    message: Option<String>,
+}
+
+fn event_to_status(event: &str) -> &str {
+    match event {
+        "SessionStart" => "idle",
+        "UserPromptSubmit" => "working",
+        "PreToolUse" => "working",
+        "PostToolUse" => "working",
+        "PostToolUseFailure" => "working",
+        "Notification" => "waiting",
+        "Stop" => "idle",
+        "SessionEnd" => "offline",
+        _ => "working",
+    }
+}
+
+fn extract_detail(input: &HookInput) -> String {
+    if let Some(ref ti) = input.tool_input {
+        if let Some(s) = ti.get("command").and_then(|v| v.as_str()) {
+            return s.chars().take(200).collect();
+        }
+        if let Some(s) = ti.get("file_path").and_then(|v| v.as_str()) {
+            return s.chars().take(200).collect();
+        }
+        if let Some(s) = ti.get("pattern").and_then(|v| v.as_str()) {
+            return s.chars().take(200).collect();
+        }
+    }
+    if let Some(ref s) = input.prompt {
+        return s.chars().take(200).collect();
+    }
+    if let Some(ref s) = input.message {
+        return s.chars().take(200).collect();
+    }
+    String::new()
+}
+
+fn cmd_hook(conn: &Connection) {
+    let mut input_str = String::new();
+    io::stdin().read_to_string(&mut input_str).unwrap_or(0);
+
+    let input: HookInput = serde_json::from_str(&input_str).unwrap_or_default();
+
+    let session_id = match input.session_id {
+        Some(ref id) if !id.is_empty() => id.clone(),
+        _ => return,
+    };
+
+    let event = input.hook_event_name.as_deref().unwrap_or("");
+    let status = event_to_status(event);
+    let tool = input.tool_name.as_deref().unwrap_or("");
+    let detail = extract_detail(&input);
+    let cwd = input.cwd.as_deref().unwrap_or("");
+
+    let tmux_session = current_tmux_session().unwrap_or_default();
+
+    // On SessionStart, adopt any placeholder from `cj init`
+    if event == "SessionStart" && !tmux_session.is_empty() {
+        let placeholder_id = format!("tmux:{}", tmux_session);
+        let topic: Option<String> = conn
+            .query_row(
+                "SELECT topic FROM sessions WHERE session_id = ?1",
+                [&placeholder_id],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+
+        if let Some(ref topic_val) = topic {
+            // Move milestones from placeholder to real session
+            let _ = conn.execute(
+                "UPDATE milestones SET session_id = ?1 WHERE session_id = ?2",
+                rusqlite::params![session_id, placeholder_id],
+            );
+            // Delete placeholder
+            let _ = conn.execute(
+                "DELETE FROM sessions WHERE session_id = ?1",
+                [&placeholder_id],
+            );
+            // Insert real session with adopted topic
+            conn.execute(
+                "INSERT INTO sessions (session_id, status, tool_name, detail, cwd, tmux_session, topic, started_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                 ON CONFLICT(session_id) DO UPDATE SET status=excluded.status, tool_name=excluded.tool_name, detail=excluded.detail, cwd=excluded.cwd, tmux_session=excluded.tmux_session, topic=excluded.topic, updated_at=CURRENT_TIMESTAMP",
+                rusqlite::params![session_id, status, tool, detail, cwd, tmux_session, topic_val],
+            )
+            .unwrap();
+            return;
+        }
+    }
+
+    // Normal upsert — preserve existing topic
+    conn.execute(
+        "INSERT INTO sessions (session_id, status, tool_name, detail, cwd, tmux_session, started_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         ON CONFLICT(session_id) DO UPDATE SET status=excluded.status, tool_name=excluded.tool_name, detail=excluded.detail, cwd=excluded.cwd, tmux_session=excluded.tmux_session, updated_at=CURRENT_TIMESTAMP",
+        rusqlite::params![session_id, status, tool, detail, cwd, tmux_session],
+    )
+    .unwrap();
 }
 
 fn cmd_milestone(conn: &Connection, text: &str) {
@@ -675,6 +787,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conn = open_db()?;
 
     match args.get(1).map(|s| s.as_str()) {
+        Some("hook") => {
+            cmd_hook(&conn);
+        }
         Some("init") => {
             let text = args[2..].join(" ");
             if text.is_empty() {
