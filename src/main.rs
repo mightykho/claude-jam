@@ -50,6 +50,7 @@ fn status_emoji(status: &str, is_stale: bool) -> &'static str {
         "working" => "🔨",
         "waiting" => "🔔",
         "idle" => "✅",
+        "pending" => "⏳",
         _ => "❓",
     }
 }
@@ -62,6 +63,7 @@ fn status_color(status: &str, is_stale: bool) -> Color {
         "working" => Color::Green,
         "waiting" => Color::Yellow,
         "idle" => Color::Gray,
+        "pending" => Color::DarkGray,
         _ => Color::Gray,
     }
 }
@@ -207,6 +209,25 @@ fn cmd_topic(conn: &Connection, text: &str) {
     )
     .unwrap();
     println!("Topic set for session in '{}'", tmux);
+}
+
+fn cmd_init(conn: &Connection, topic: &str) {
+    let tmux = match current_tmux_session() {
+        Some(t) => t,
+        None => {
+            eprintln!("Error: not in a tmux session");
+            std::process::exit(1);
+        }
+    };
+    let placeholder_id = format!("tmux:{}", tmux);
+    conn.execute(
+        "INSERT INTO sessions (session_id, status, tmux_session, topic, started_at, updated_at)
+         VALUES (?1, 'pending', ?2, ?3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         ON CONFLICT(session_id) DO UPDATE SET topic=excluded.topic, updated_at=CURRENT_TIMESTAMP",
+        rusqlite::params![placeholder_id, tmux, topic],
+    )
+    .unwrap();
+    println!("Session initialized in '{}' with topic: {}", tmux, topic);
 }
 
 fn cmd_milestone(conn: &Connection, text: &str) {
@@ -654,6 +675,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conn = open_db()?;
 
     match args.get(1).map(|s| s.as_str()) {
+        Some("init") => {
+            let text = args[2..].join(" ");
+            if text.is_empty() {
+                eprintln!("Usage: cj init <topic>");
+                std::process::exit(1);
+            }
+            cmd_init(&conn, &text);
+        }
         Some("topic") => {
             let text = args[2..].join(" ");
             if text.is_empty() {
