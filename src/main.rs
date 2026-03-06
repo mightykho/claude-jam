@@ -64,7 +64,7 @@ fn status_color(status: &str, is_stale: bool) -> Color {
     match status {
         "working" => Color::Green,
         "waiting" => Color::Yellow,
-        "idle" => Color::Gray,
+        "idle" => Color::Green,
         "pending" => Color::DarkGray,
         _ => Color::Gray,
     }
