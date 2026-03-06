@@ -424,6 +424,28 @@ fn delete_session(conn: &Connection, session_id: &str) {
     let _ = conn.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id]);
 }
 
+fn cmd_remove(conn: &Connection, tmux_name: &str) {
+    let mut stmt = conn
+        .prepare("SELECT session_id FROM sessions WHERE tmux_session = ?1")
+        .unwrap();
+    let ids: Vec<String> = stmt
+        .query_map([tmux_name], |row| row.get(0))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    if ids.is_empty() {
+        println!("No sessions found for tmux session '{}'", tmux_name);
+        return;
+    }
+    for id in &ids {
+        delete_session(conn, id);
+    }
+    // Also remove any placeholder
+    let placeholder_id = format!("tmux:{}", tmux_name);
+    delete_session(conn, &placeholder_id);
+    println!("Removed {} session(s) for '{}'", ids.len(), tmux_name);
+}
+
 fn switch_tmux_session(session_name: &str) {
     let _ = Command::new("tmux")
         .args(["switch-client", "-t", session_name])
@@ -796,6 +818,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  cj init [-s name] <topic>  Pre-register session with topic (-s for explicit tmux session)");
         println!("  cj topic <text>      Set topic for current session");
         println!("  cj milestone <text>  Add milestone to current session");
+        println!("  cj remove <tmux>     Remove all sessions for a tmux session");
         println!("  cj hook              Process hook event from stdin (used by claude-jam.sh)");
         println!();
         println!("TUI keys:");
@@ -826,6 +849,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
             cmd_init(&conn, tmux_override, &text);
+        }
+        Some("remove") => {
+            let name = args[2..].join(" ");
+            if name.is_empty() {
+                eprintln!("Usage: cj remove <tmux-session>");
+                std::process::exit(1);
+            }
+            cmd_remove(&conn, &name);
         }
         Some("topic") => {
             let text = args[2..].join(" ");
