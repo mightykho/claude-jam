@@ -534,16 +534,20 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
             ];
 
             // Append current tool+detail after dash
-            let tool = s.tool_name.as_deref().unwrap_or("");
-            let detail = s.detail.as_deref().unwrap_or("");
-            if s.status == "working" && (!tool.is_empty() || !detail.is_empty()) {
-                let activity = if !tool.is_empty() && !detail.is_empty() {
+            let activity = if s.status == "idle" {
+                "Done".to_string()
+            } else {
+                let tool = s.tool_name.as_deref().unwrap_or("");
+                let detail = s.detail.as_deref().unwrap_or("");
+                if !tool.is_empty() && !detail.is_empty() {
                     format!("{} {}", tool, detail)
                 } else if !tool.is_empty() {
                     tool.to_string()
                 } else {
                     detail.to_string()
-                };
+                }
+            };
+            if !activity.is_empty() {
                 let max_activity = width.saturating_sub(label.len() + 2 + emoji.len() + 1 + tmux.len() + 2 + time.len() + 5);
                 let activity_display = if activity.len() > max_activity {
                     format!("{}…", &activity[..max_activity.saturating_sub(1)])
