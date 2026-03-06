@@ -786,6 +786,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let conn = open_db()?;
 
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        println!("cj - Claude Jam: monitor and manage Claude Code sessions");
+        println!();
+        println!("Usage:");
+        println!("  cj                   Launch TUI dashboard");
+        println!("  cj -q                Launch TUI, quit after selecting a session");
+        println!("  cj init <topic>      Pre-register session with topic (before Claude starts)");
+        println!("  cj topic <text>      Set topic for current session");
+        println!("  cj milestone <text>  Add milestone to current session");
+        println!("  cj hook              Process hook event from stdin (used by claude-jam.sh)");
+        println!();
+        println!("TUI keys:");
+        println!("  j/k        Navigate sessions");
+        println!("  1-9        Jump to session by number");
+        println!("  Ctrl-a..z  Jump to session by letter (after 9)");
+        println!("  Enter      Switch to session's tmux session");
+        println!("  o          Expand/collapse milestone history");
+        println!("  d          Delete session");
+        println!("  q          Quit");
+        return Ok(());
+    }
+
     match args.get(1).map(|s| s.as_str()) {
         Some("hook") => {
             cmd_hook(&conn);
