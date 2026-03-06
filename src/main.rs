@@ -557,7 +557,7 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
                 } else {
                     activity
                 };
-                header_spans.push(Span::styled(format!(" — {}", activity_display), Style::default().fg(Color::Gray)));
+                header_spans.push(Span::styled(format!(" — {}", activity_display), Style::default().fg(Color::DarkGray)));
             }
 
             lines.push(Line::from(header_spans));
