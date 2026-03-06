@@ -529,8 +529,8 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
             let label = shortcut_label(i);
             let mut lines = vec![];
 
-            // Line 1: shortcut + emoji + project name + tmux session + time
-            lines.push(Line::from(vec![
+            // Line 1: shortcut + emoji + project name + tmux session + time + current tool
+            let mut header_spans = vec![
                 Span::styled(format!("{} ", label), Style::default().fg(Color::Cyan)),
                 Span::styled(format!("{} ", emoji), Style::default()),
                 Span::styled(
@@ -538,7 +538,29 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(format!("  {}", time), Style::default().fg(Color::Gray)),
-            ]));
+            ];
+
+            // Append current tool+detail after dash
+            let tool = s.tool_name.as_deref().unwrap_or("");
+            let detail = s.detail.as_deref().unwrap_or("");
+            if s.status == "working" && (!tool.is_empty() || !detail.is_empty()) {
+                let activity = if !tool.is_empty() && !detail.is_empty() {
+                    format!("{} {}", tool, detail)
+                } else if !tool.is_empty() {
+                    tool.to_string()
+                } else {
+                    detail.to_string()
+                };
+                let max_activity = width.saturating_sub(label.len() + 2 + emoji.len() + 1 + project.len() + tmux.len() + 2 + time.len() + 5);
+                let activity_display = if activity.len() > max_activity {
+                    format!("{}…", &activity[..max_activity.saturating_sub(1)])
+                } else {
+                    activity
+                };
+                header_spans.push(Span::styled(format!(" — {}", activity_display), Style::default().fg(Color::Gray)));
+            }
+
+            lines.push(Line::from(header_spans));
 
             // Line 2: topic or tool+detail
             let latest_milestone = fetch_latest_milestone(conn, &s.session_id);
