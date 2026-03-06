@@ -623,6 +623,9 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
                 }
             }
 
+            // Add blank line separator between sessions
+            lines.push(Line::from(""));
+
             if i == app.selected {
                 ListItem::new(lines)
                     .style(Style::default().bg(Color::Black).fg(Color::White))
