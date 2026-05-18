@@ -184,27 +184,34 @@ fn find_session_by_tmux(conn: &Connection, tmux_name: &str) -> Option<String> {
     .ok()
 }
 
-fn cmd_topic(conn: &Connection, text: &str) {
+fn resolve_session_id(conn: &Connection, session_id_override: Option<&str>) -> String {
+    if let Some(id) = session_id_override {
+        return id.to_string();
+    }
     let tmux = match current_tmux_session() {
         Some(t) => t,
         None => {
-            eprintln!("Error: not in a tmux session");
+            eprintln!("Error: not in a tmux session and no --session-id provided");
             std::process::exit(1);
         }
     };
-    let session_id = match find_session_by_tmux(&conn, &tmux) {
+    match find_session_by_tmux(conn, &tmux) {
         Some(id) => id,
         None => {
             eprintln!("Error: no active session found for tmux session '{}'", tmux);
             std::process::exit(1);
         }
-    };
+    }
+}
+
+fn cmd_topic(conn: &Connection, session_id_override: Option<&str>, text: &str) {
+    let session_id = resolve_session_id(conn, session_id_override);
     conn.execute(
         "UPDATE sessions SET topic = ?1 WHERE session_id = ?2",
         rusqlite::params![text, session_id],
     )
     .unwrap();
-    println!("Topic set for session in '{}'", tmux);
+    println!("Topic set for session {}", session_id);
 }
 
 fn cmd_init(conn: &Connection, tmux_override: Option<&str>, topic: &str) {
@@ -339,27 +346,14 @@ fn cmd_hook(conn: &Connection) {
     .unwrap();
 }
 
-fn cmd_milestone(conn: &Connection, text: &str) {
-    let tmux = match current_tmux_session() {
-        Some(t) => t,
-        None => {
-            eprintln!("Error: not in a tmux session");
-            std::process::exit(1);
-        }
-    };
-    let session_id = match find_session_by_tmux(&conn, &tmux) {
-        Some(id) => id,
-        None => {
-            eprintln!("Error: no active session found for tmux session '{}'", tmux);
-            std::process::exit(1);
-        }
-    };
+fn cmd_milestone(conn: &Connection, session_id_override: Option<&str>, text: &str) {
+    let session_id = resolve_session_id(conn, session_id_override);
     conn.execute(
         "INSERT INTO milestones (session_id, summary) VALUES (?1, ?2)",
         rusqlite::params![session_id, text],
     )
     .unwrap();
-    println!("Milestone added for session in '{}'", tmux);
+    println!("Milestone added for session {}", session_id);
 }
 
 fn fetch_sessions(conn: &Connection) -> Vec<Session> {
@@ -816,8 +810,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  cj                   Launch TUI dashboard");
         println!("  cj -q                Launch TUI, quit after selecting a session");
         println!("  cj init [-s name] <topic>  Pre-register session with topic (-s for explicit tmux session)");
-        println!("  cj topic <text>      Set topic for current session");
-        println!("  cj milestone <text>  Add milestone to current session");
+        println!("  cj topic [--session-id <id>] <text>      Set topic (auto-detects via tmux, or use --session-id)");
+        println!("  cj milestone [--session-id <id>] <text>  Add milestone (auto-detects via tmux, or use --session-id)");
         println!("  cj remove <tmux>     Remove all sessions for a tmux session");
         println!("  cj hook              Process hook event from stdin (used by claude-jam.sh)");
         println!();
@@ -859,20 +853,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cmd_remove(&conn, &name);
         }
         Some("topic") => {
-            let text = args[2..].join(" ");
+            let rest = &args[2..];
+            let (sid_override, text_args) = if rest.len() >= 2 && rest[0] == "--session-id" {
+                (Some(rest[1].as_str()), &rest[2..])
+            } else {
+                (None, rest)
+            };
+            let text = text_args.join(" ");
             if text.is_empty() {
-                eprintln!("Usage: cj topic <description>");
+                eprintln!("Usage: cj topic [--session-id <id>] <description>");
                 std::process::exit(1);
             }
-            cmd_topic(&conn, &text);
+            cmd_topic(&conn, sid_override, &text);
         }
         Some("milestone") => {
-            let text = args[2..].join(" ");
+            let rest = &args[2..];
+            let (sid_override, text_args) = if rest.len() >= 2 && rest[0] == "--session-id" {
+                (Some(rest[1].as_str()), &rest[2..])
+            } else {
+                (None, rest)
+            };
+            let text = text_args.join(" ");
             if text.is_empty() {
-                eprintln!("Usage: cj milestone <description>");
+                eprintln!("Usage: cj milestone [--session-id <id>] <description>");
                 std::process::exit(1);
             }
-            cmd_milestone(&conn, &text);
+            cmd_milestone(&conn, sid_override, &text);
         }
         _ => {
             let quit_on_select = args.iter().any(|a| a == "-q" || a == "--quit");
