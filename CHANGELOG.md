@@ -4,6 +4,19 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-05-28
+
+First public release.
+
+### Changed
+- Refactored the monolithic 1964-line `src/main.rs` into a lib + bin split. `lib.rs` exposes `db`, `hook`, `models`, `time`, and `tmux`; the binary owns `commands`, `tui`, and arg dispatch. The biggest file is now 369 lines. The 44 tests run as 13 (lib unit) + 12 (bin unit) + 19 (integration against in-memory SQLite).
+
+### Added
+- `rust-toolchain.toml` pins the Rust toolchain to `1.95` so local `cargo clippy` matches CI.
+
+### Fixed
+- Three `collapsible_match` clippy errors that landed in Rust 1.95 and broke the CI build for the v0.1.0 tag.
+
 ## [0.1.0] — 2026-05-28
 
 Initial release.
@@ -22,5 +35,6 @@ Initial release.
 - 44 unit + integration tests covering pure helpers, transcript parsing, and the DB layer against in-memory SQLite.
 - GitHub Actions CI matrix on Ubuntu + macOS running `cargo fmt --check`, `cargo clippy -D warnings`, and `cargo test`.
 
-[Unreleased]: https://github.com/mightykho/claude-jam/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/mightykho/claude-jam/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/mightykho/claude-jam/releases/tag/v0.1.1
 [0.1.0]: https://github.com/mightykho/claude-jam/releases/tag/v0.1.0
