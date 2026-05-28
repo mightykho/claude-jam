@@ -1,0 +1,5 @@
+[toolchain]
+# Pin the toolchain so local fmt/clippy match CI exactly.
+# Bump in lock-step with the CI workflow; clippy lints differ between releases.
+channel = "1.95"
+components = ["rustfmt", "clippy"]

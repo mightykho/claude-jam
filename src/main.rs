@@ -1147,19 +1147,15 @@ fn run_tui(
                     match key.code {
                         KeyCode::Char('q') if !ctrl => break,
                         KeyCode::Esc => break,
-                        KeyCode::Char('j') | KeyCode::Down => {
-                            if !ctrl && !app.sessions.is_empty() {
-                                app.selected = (app.selected + 1) % app.sessions.len();
-                            }
+                        KeyCode::Char('j') | KeyCode::Down if !ctrl && !app.sessions.is_empty() => {
+                            app.selected = (app.selected + 1) % app.sessions.len();
                         }
-                        KeyCode::Char('k') | KeyCode::Up => {
-                            if !ctrl && !app.sessions.is_empty() {
-                                app.selected = if app.selected == 0 {
-                                    app.sessions.len() - 1
-                                } else {
-                                    app.selected - 1
-                                };
-                            }
+                        KeyCode::Char('k') | KeyCode::Up if !ctrl && !app.sessions.is_empty() => {
+                            app.selected = if app.selected == 0 {
+                                app.sessions.len() - 1
+                            } else {
+                                app.selected - 1
+                            };
                         }
                         KeyCode::Char('o') if !ctrl => {
                             app.toggle_expand();
@@ -1171,10 +1167,8 @@ fn run_tui(
                             }
                             terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
                         }
-                        KeyCode::Char('d') if !ctrl => {
-                            if app.selected_session().is_some() {
-                                app.pending_delete = Some(app.selected);
-                            }
+                        KeyCode::Char('d') if !ctrl && app.selected_session().is_some() => {
+                            app.pending_delete = Some(app.selected);
                         }
                         KeyCode::Char(c @ '1'..='9') if !ctrl => {
                             if let Some(idx) = app.session_at_number(c) {

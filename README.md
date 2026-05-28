@@ -130,17 +130,17 @@ You can also feed `cj context` into your tmux status line for a context-window i
 ## Development
 
 ```bash
-# Run tests
-cargo test --release
-
-# Format and lint
-cargo fmt --all
+# Pre-push gate — run all three (same as CI). Fix locally on any failure.
+cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
+cargo test --release
 
 # Dev install — symlink ~/bin/cj to the build output so
 # `cargo build --release` alone refreshes the running binary
 ./install.sh --dev
 ```
+
+The Rust toolchain is pinned in `rust-toolchain.toml` so local lints match what CI sees. Rustup will auto-fetch the pinned version on first invocation.
 
 The codebase lives in a single `src/main.rs` (~1.5K lines) split into clear sections — time helpers, schema/migrations, transcript parsing, command handlers, and the TUI render loop. Database access uses `rusqlite` with the bundled SQLite, so there's no system dependency beyond `tmux` for the integration tests / switching keystrokes.
 
