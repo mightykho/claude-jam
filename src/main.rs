@@ -14,7 +14,8 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::layout::Rect;
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::{Frame, Terminal};
 use rusqlite::Connection;
 
@@ -507,6 +508,72 @@ fn delete_session(conn: &Connection, session_id: &str) {
     let _ = conn.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id]);
 }
 
+fn cmd_import(conn: &Connection) {
+    let output = Command::new("tmux")
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .output();
+
+    let tmux_sessions: Vec<String> = match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        _ => {
+            eprintln!("Error: failed to list tmux sessions (is tmux running?)");
+            std::process::exit(1);
+        }
+    };
+
+    if tmux_sessions.is_empty() {
+        println!("No tmux sessions found");
+        return;
+    }
+
+    let mut imported: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+
+    for tmux in &tmux_sessions {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE tmux_session = ?1 AND status != 'offline'",
+                [tmux],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        if count > 0 {
+            skipped.push(tmux.clone());
+            continue;
+        }
+
+        let placeholder_id = format!("tmux:{}", tmux);
+        let affected = conn
+            .execute(
+                "INSERT INTO sessions (session_id, status, tmux_session, started_at, updated_at)
+                 VALUES (?1, 'pending', ?2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                 ON CONFLICT(session_id) DO NOTHING",
+                rusqlite::params![placeholder_id, tmux],
+            )
+            .unwrap_or(0);
+        if affected > 0 {
+            imported.push(tmux.clone());
+        } else {
+            skipped.push(tmux.clone());
+        }
+    }
+
+    if !imported.is_empty() {
+        println!("Imported {} session(s):", imported.len());
+        for t in &imported {
+            println!("  + {}", t);
+        }
+    }
+    if !skipped.is_empty() {
+        println!("Skipped {} session(s) already tracked", skipped.len());
+    }
+}
+
 fn cmd_remove(conn: &Connection, tmux_name: &str) {
     let mut stmt = conn
         .prepare("SELECT session_id FROM sessions WHERE tmux_session = ?1")
@@ -539,14 +606,20 @@ struct App {
     sessions: Vec<Session>,
     selected: usize,
     expanded: Option<usize>, // index of session with milestones expanded
+    pending_delete: Option<usize>, // index of session pending delete confirmation
+    borderless: bool,
+    vertical: bool,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(borderless: bool, vertical: bool) -> Self {
         Self {
             sessions: Vec::new(),
             selected: 0,
             expanded: None,
+            pending_delete: None,
+            borderless,
+            vertical,
         }
     }
 
@@ -614,11 +687,104 @@ fn shortcut_label(i: usize) -> String {
     }
 }
 
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let w = width.min(area.width);
+    let h = height.min(area.height);
+    Rect {
+        x: area.x + (area.width.saturating_sub(w)) / 2,
+        y: area.y + (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    }
+}
+
+fn render_delete_popup(frame: &mut Frame, area: Rect, session: &Session) {
+    let tmux = session
+        .tmux_session
+        .as_deref()
+        .filter(|t| !t.is_empty())
+        .unwrap_or(&session.session_id);
+
+    let topic = session.topic.as_deref().unwrap_or("");
+    let inner_width: usize = 46;
+
+    let target = truncate_chars(tmux, inner_width);
+    let topic_line = if topic.is_empty() {
+        None
+    } else {
+        Some(truncate_chars(topic, inner_width))
+    };
+
+    let height: u16 = if topic_line.is_some() { 8 } else { 7 };
+    let popup = centered_rect(inner_width as u16 + 4, height, area);
+
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(Span::styled(
+            " Delete session? ",
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            target,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    if let Some(t) = topic_line {
+        lines.push(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(t, Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            "[Y]",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("es", Style::default().fg(Color::Green)),
+        Span::raw("   "),
+        Span::styled(
+            "[N]",
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("o", Style::default().fg(Color::Red)),
+        Span::raw("   "),
+        Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+    ]));
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
     let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(frame.area());
 
     let area = chunks[0];
-    let width = area.width.saturating_sub(4) as usize;
+    let width = if app.borderless {
+        area.width as usize
+    } else {
+        area.width.saturating_sub(4) as usize
+    };
 
     let items: Vec<ListItem> = app
         .sessions
@@ -639,28 +805,31 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
             let label = shortcut_label(i);
             let mut lines = vec![];
 
-            // Line 1: shortcut + emoji + project name + tmux session + time + context bar + current tool
-            let mut header_spans = vec![
+            // Title: shortcut + emoji + tmux name
+            let title_spans: Vec<Span> = vec![
                 Span::styled(format!("{} ", label), Style::default().fg(Color::Cyan)),
                 Span::styled(format!("{} ", emoji), Style::default()),
                 Span::styled(
                     tmux.trim().to_string(),
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(format!("  {}", time), Style::default().fg(Color::Gray)),
             ];
 
+            // Context bar (optional) — comes before time
             let ctx_bar = s
                 .context_used
                 .zip(s.context_total)
                 .and_then(|(u, t)| format_context_bar(u, t));
-            let ctx_len = ctx_bar.as_ref().map(|(s, _)| s.chars().count() + 2).unwrap_or(0);
-            if let Some((ref bar, bar_color)) = ctx_bar {
-                header_spans.push(Span::raw("  "));
-                header_spans.push(Span::styled(bar.clone(), Style::default().fg(bar_color)));
-            }
+            let bar_width = ctx_bar.as_ref().map(|(b, _)| b.chars().count() + 2).unwrap_or(0);
 
-            // Append current tool+detail after dash
+            // Detail: context + time + activity
+            let mut detail_spans: Vec<Span> = vec![];
+            if let Some((ref bar, bar_color)) = ctx_bar {
+                detail_spans.push(Span::styled(bar.clone(), Style::default().fg(bar_color)));
+                detail_spans.push(Span::raw("  "));
+            }
+            detail_spans.push(Span::styled(time.clone(), Style::default().fg(Color::Gray)));
+
             let activity = if s.status == "idle" {
                 "Done".to_string()
             } else {
@@ -675,25 +844,39 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
                 }
             };
             if !activity.is_empty() {
-                let max_activity = width.saturating_sub(
-                    label.chars().count()
-                        + 2
-                        + emoji.chars().count()
-                        + 1
-                        + tmux.chars().count()
-                        + 2
-                        + time.chars().count()
-                        + ctx_len
-                        + 5,
-                );
+                let max_activity = if app.vertical {
+                    width.saturating_sub(2 + bar_width + time.chars().count() + 5)
+                } else {
+                    width.saturating_sub(
+                        label.chars().count()
+                            + 2
+                            + emoji.chars().count()
+                            + 1
+                            + tmux.chars().count()
+                            + 2
+                            + bar_width
+                            + time.chars().count()
+                            + 5,
+                    )
+                };
                 let activity_display = truncate_chars(&activity, max_activity);
-                header_spans.push(Span::styled(
+                detail_spans.push(Span::styled(
                     format!(" — {}", activity_display),
                     Style::default().fg(Color::DarkGray),
                 ));
             }
 
-            lines.push(Line::from(header_spans));
+            if app.vertical {
+                lines.push(Line::from(title_spans));
+                let mut indented: Vec<Span> = vec![Span::raw("  ")];
+                indented.extend(detail_spans);
+                lines.push(Line::from(indented));
+            } else {
+                let mut combined = title_spans;
+                combined.push(Span::raw("  "));
+                combined.extend(detail_spans);
+                lines.push(Line::from(combined));
+            }
 
             // Line 2: topic or tool+detail
             let latest_milestone = fetch_latest_milestone(conn, &s.session_id);
@@ -757,12 +940,16 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
         })
         .collect();
 
-    let list = List::new(items).block(
-        Block::default()
-            .title(" Claude Jam ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan)),
-    );
+    let list = if app.borderless {
+        List::new(items)
+    } else {
+        List::new(items).block(
+            Block::default()
+                .title(" Claude Jam ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+    };
 
     frame.render_widget(list, area);
 
@@ -795,9 +982,20 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
     .style(Style::default().fg(Color::DarkGray));
 
     frame.render_widget(Paragraph::new(footer), chunks[1]);
+
+    if let Some(idx) = app.pending_delete {
+        if let Some(s) = app.sessions.get(idx) {
+            render_delete_popup(frame, frame.area(), s);
+        }
+    }
 }
 
-fn run_tui(conn: &Connection, quit_on_select: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn run_tui(
+    conn: &Connection,
+    quit_on_select: bool,
+    borderless: bool,
+    vertical: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
@@ -811,7 +1009,7 @@ fn run_tui(conn: &Connection, quit_on_select: bool) -> Result<(), Box<dyn std::e
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new();
+    let mut app = App::new(borderless, vertical);
     app.refresh(conn);
     let mut last_tick = Instant::now();
 
@@ -822,6 +1020,29 @@ fn run_tui(conn: &Connection, quit_on_select: bool) -> Result<(), Box<dyn std::e
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
+                    if app.pending_delete.is_some() {
+                        match key.code {
+                            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                if let Some(idx) = app.pending_delete {
+                                    if let Some(session) = app.sessions.get(idx) {
+                                        let id = session.session_id.clone();
+                                        delete_session(conn, &id);
+                                        app.refresh(conn);
+                                    }
+                                }
+                                app.pending_delete = None;
+                            }
+                            KeyCode::Char('n')
+                            | KeyCode::Char('N')
+                            | KeyCode::Esc
+                            | KeyCode::Char('q') => {
+                                app.pending_delete = None;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     let switch = |idx: usize,
                                   terminal: &mut Terminal<CrosstermBackend<io::Stdout>>|
                      -> Result<(), Box<dyn std::error::Error>> {
@@ -869,10 +1090,8 @@ fn run_tui(conn: &Connection, quit_on_select: bool) -> Result<(), Box<dyn std::e
                             terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
                         }
                         KeyCode::Char('d') if !ctrl => {
-                            if let Some(session) = app.selected_session() {
-                                let id = session.session_id.clone();
-                                delete_session(conn, &id);
-                                app.refresh(conn);
+                            if app.selected_session().is_some() {
+                                app.pending_delete = Some(app.selected);
                             }
                         }
                         KeyCode::Char(c @ '1'..='9') if !ctrl => {
@@ -924,10 +1143,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Usage:");
         println!("  cj                   Launch TUI dashboard");
         println!("  cj -q                Launch TUI, quit after selecting a session");
+        println!("  cj -b                Borderless mode (no title bar / border)");
+        println!("  cj -v                Vertical mode (detail line below the title)");
         println!("  cj init [-s name] <topic>  Pre-register session with topic (-s for explicit tmux session)");
         println!("  cj topic [--session-id <id>] <text>      Set topic (auto-detects via tmux, or use --session-id)");
         println!("  cj milestone [--session-id <id>] <text>  Add milestone (auto-detects via tmux, or use --session-id)");
         println!("  cj context [--session-id <id>]           Print context usage as 'used/total' tokens");
+        println!("  cj import            Import all tmux sessions into cj (skips ones already tracked)");
         println!("  cj remove <tmux>     Remove all sessions for a tmux session");
         println!("  cj hook              Process hook event from stdin (used by claude-jam.sh)");
         println!();
@@ -959,6 +1181,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
             cmd_init(&conn, tmux_override, &text);
+        }
+        Some("import") => {
+            cmd_import(&conn);
         }
         Some("remove") => {
             let name = args[2..].join(" ");
@@ -1007,7 +1232,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             let quit_on_select = args.iter().any(|a| a == "-q" || a == "--quit");
-            run_tui(&conn, quit_on_select)?;
+            let borderless = args.iter().any(|a| a == "-b" || a == "--borderless");
+            let vertical = args.iter().any(|a| a == "-v" || a == "--vertical");
+            run_tui(&conn, quit_on_select, borderless, vertical)?;
         }
     }
 
