@@ -1,29 +1,18 @@
 # Claude Jam
 
-A fancy tmux window switcher for modern agentic workflows.
+A fancy tmux window switcher and TUI dashboard for modern agentic workflows.
 
-[![CI](https://github.com/your-org/claude-jam/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/claude-jam/actions/workflows/ci.yml)
+[![CI](https://github.com/mightykho/claude-jam/actions/workflows/ci.yml/badge.svg)](https://github.com/mightykho/claude-jam/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Claude Jam hooks into Claude Code's lifecycle events to track what each session is doing in real time — which tool it's running, whether it's waiting for input, how full its context window is, or whether it's done. Sessions appear in a compact list you can jump between with one keystroke.
 
-```
-┌─ Claude Jam ───────────────────────────────────────────────────────────┐
-│ 1 🔨 my-app          ▓▓▓░░░░░ 38%   12s ago — Read src/main.rs         │
-│   │ Implement auth middleware                                          │
-│   ├ ⚑ Added JWT verification   3m ago                                  │
-│                                                                        │
-│ 2 🔔 docs-site       ▓▓▓▓▓▓░░ 72%   1m ago  — waiting for input        │
-│   │ Migrate to MDX                                                     │
-│                                                                        │
-│ 3 ✅ infra           ▓▓▓░░░░░ 41%   8m ago  — Done                     │
-└────────────────────────────────────────────────────────────────────────┘
-```
+![Claude Jam dashboard](docs/screenshot-default.png)
 
 ## Install
 
 ```bash
-git clone https://github.com/your-org/claude-jam && cd claude-jam
+git clone https://github.com/mightykho/claude-jam && cd claude-jam
 ./install.sh
 ```
 
@@ -55,6 +44,10 @@ cj remove <tmux-session>                 Drop all sessions matching a tmux name
 cj hook                                  Process a hook event from stdin (used internally)
 cj -h                                    Show help
 ```
+
+`-b -v` together give a chromeless stacked view that's ideal for narrow popups or tmux side-panels, with full milestone history expanded:
+
+![Borderless vertical mode with milestones expanded](docs/screenshot-vertical.png)
 
 ### TUI keybindings
 
@@ -98,26 +91,13 @@ Each event invocation does three things:
 
 1. **Upserts the session row** — derives a status from the event name (`PreToolUse → working`, `Notification → waiting`, `Stop → idle`, `SessionEnd → offline`), extracts the most useful detail from the tool input (command for Bash, file_path for Read, pattern for Grep, fallback to the prompt or notification message), and writes it next to the tmux session name.
 2. **Parses the transcript** — Claude Code passes the path to the session's JSONL transcript on every event. The hook reads it backwards to find the latest assistant message, sums `input + cache_creation + cache_read + output` tokens, and writes that to `context_used`. The `context_total` defaults to 200K and auto-bumps to 1M once observed usage exceeds 200K (this is the only reliable signal — the transcript doesn't expose the model's actual context window).
-3. **Adopts placeholders** — if you ran `cj init <topic>` before starting Claude in a tmux session, the hook detects the matching placeholder on `SessionStart` and migrates its topic onto the real session row.
+3. **Adopts placeholders** — if you ran `cj init <topic>` or `cj import` to seed a tmux session before its real Claude session appeared, the hook detects the matching `tmux:<name>` placeholder on the next event, migrates its topic and milestones onto the real session row, and deletes the placeholder. `open_db` also runs the same cleanup pass on every cj launch so stale placeholders from earlier sessions don't pile up.
 
 The TUI is a strict reader: it polls the SQLite database once a second, never writes, and decorates the rows with status colors and a 8-cell context bar. Pressing Enter shells out to `tmux switch-client -t <name>` so the keystroke takes you straight to the session's pane.
 
 The schema is tiny — two tables (`sessions`, `milestones`) — and migrations are idempotent `ALTER TABLE ADD COLUMN` statements wrapped in `let _ =` so re-runs are no-ops. The database is local-only; no network calls anywhere in the project.
 
-## tmux integration (optional)
-
-Bind `cj` to a tmux key for quick access:
-
-```tmux
-# Prefix-w opens Claude Jam in a popup (auto-closes on selection)
-bind w display-popup -E "cj -q"
-```
-
-Reload with `tmux source-file ~/.tmux.conf`. Now `<prefix> w` shows every active Claude session — pick one and tmux jumps straight to it.
-
-You can also feed `cj context` into your tmux status line for a context-window indicator across all sessions.
-
-## Reporting topics and milestones
+### Reporting topics and milestones
 
 The installer adds an instruction to `~/.claude/CLAUDE.md` telling Claude to run:
 
@@ -133,6 +113,19 @@ tmux new-session -s my-feature
 cj init "wire up the new billing endpoint"
 claude  # SessionStart fires, topic moves onto the real session row
 ```
+
+## tmux integration (optional)
+
+Bind `cj` to a tmux key for quick access:
+
+```tmux
+# Prefix-w opens Claude Jam in a popup (auto-closes on selection)
+bind w display-popup -E "cj -q"
+```
+
+Reload with `tmux source-file ~/.tmux.conf`. Now `<prefix> w` shows every active Claude session — pick one and tmux jumps straight to it.
+
+You can also feed `cj context` into your tmux status line for a context-window indicator across all sessions.
 
 ## Development
 

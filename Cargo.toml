@@ -2,7 +2,7 @@
 name = "claude-jam"
 version = "0.1.0"
 edition = "2021"
-description = "A fancy tmux window switcher for modern agentic workflows"
+description = "A fancy tmux window switcher and TUI dashboard for modern agentic workflows"
 license = "MIT"
 readme = "README.md"
 keywords = ["claude", "claude-code", "tui", "tmux", "dashboard"]
