@@ -29,8 +29,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+
+      - name: Activate pinned toolchain and add target
+        # `rust-toolchain.toml` pins the channel; `rustup show` triggers the
+        # auto-install on first use. `target add` then installs the std for
+        # the cross-compile target against the pinned toolchain (not stable).
+        run: |
+          rustup show
+          rustup target add ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
