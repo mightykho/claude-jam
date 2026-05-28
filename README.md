@@ -142,9 +142,31 @@ cargo test --release
 
 The Rust toolchain is pinned in `rust-toolchain.toml` so local lints match what CI sees. Rustup will auto-fetch the pinned version on first invocation.
 
-The codebase lives in a single `src/main.rs` (~1.5K lines) split into clear sections — time helpers, schema/migrations, transcript parsing, command handlers, and the TUI render loop. Database access uses `rusqlite` with the bundled SQLite, so there's no system dependency beyond `tmux` for the integration tests / switching keystrokes.
+The crate is a lib + bin split. Pure, exit-free logic lives in `src/lib.rs` (re-exporting `db`, `hook`, `models`, `time`, `tmux`); the binary owns `commands` (CLI handlers that print / exit), `tui` (event loop, render, style), and `src/main.rs` itself, which is ~120 lines of arg parsing and dispatch.
 
-Tests live in `#[cfg(test)] mod tests` at the bottom of `main.rs`. They cover the pure helpers (truncation, bar rendering, transcript parsing) and the DB-touching logic (`process_hook_event`, `db_import_tmux_sessions`, `db_get_context`) against an in-memory SQLite via `Connection::open_in_memory()`. CI runs `fmt --check`, `clippy -D warnings`, and `cargo test` on Linux and macOS.
+```
+src/
+├── lib.rs            module declarations
+├── main.rs           arg parsing + dispatch
+├── models.rs         Session, Milestone, HookInput
+├── time.rs           timestamp + relative-time helpers
+├── tmux.rs           current/list/switch tmux session
+├── db/
+│   ├── mod.rs        schema, connection, queries
+│   └── placeholder.rs adopt + cleanup
+├── hook.rs           hook event processing + transcript parsing
+├── commands.rs       cmd_* CLI handlers
+└── tui/
+    ├── mod.rs        App + run_tui event loop
+    ├── render.rs     ui, render_delete_popup, centered_rect
+    └── style.rs      bar, emojis, colors, truncation
+tests/
+└── integration.rs    cross-module flows against in-memory SQLite
+```
+
+The lib pulls in only `serde + rusqlite + serde_json` — `ratatui`/`crossterm` stay on the binary side so downstream consumers of the lib don't drag in UI deps. Database access uses bundled SQLite, so the only system dependency is `tmux` itself.
+
+Tests are split three ways. Pure-function unit tests (`truncate_chars`, `format_context_bar`, `parse_timestamp`, `event_to_status`, `extract_detail`, `read_context_from_transcript`, `centered_rect`) live in `#[cfg(test)] mod tests` next to the code they cover. Cross-module DB integration tests (`process_hook_event`, `db_import_tmux_sessions`, `db_get_context`, `cleanup_orphan_placeholders`) live in `tests/integration.rs` and exercise real flows against an in-memory SQLite via `Connection::open_in_memory()`. CI runs `fmt --check`, `clippy -D warnings`, and `cargo test` on Linux and macOS.
 
 ## Contributing
 
