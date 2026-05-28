@@ -169,7 +169,79 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 fn open_db() -> rusqlite::Result<Connection> {
     let conn = Connection::open(db_path())?;
     init_schema(&conn)?;
+    cleanup_orphan_placeholders(&conn);
     Ok(conn)
+}
+
+/// Migrate a `tmux:<name>` placeholder row onto a real session row.
+/// Moves milestones, adopts the placeholder's topic if the real session has none,
+/// and deletes the placeholder. No-op if the placeholder doesn't exist or
+/// `real_session_id` equals the placeholder id.
+fn adopt_placeholder(conn: &Connection, real_session_id: &str, tmux_session: &str) {
+    if tmux_session.is_empty() {
+        return;
+    }
+    let placeholder_id = format!("tmux:{}", tmux_session);
+    if placeholder_id == real_session_id {
+        return;
+    }
+    // Bail out cheaply if there's no placeholder for this tmux name.
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM sessions WHERE session_id = ?1",
+            [&placeholder_id],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if !exists {
+        return;
+    }
+    let _ = conn.execute(
+        "UPDATE milestones SET session_id = ?1 WHERE session_id = ?2",
+        rusqlite::params![real_session_id, placeholder_id],
+    );
+    let _ = conn.execute(
+        "UPDATE sessions
+         SET topic = COALESCE(topic, (SELECT topic FROM sessions WHERE session_id = ?1))
+         WHERE session_id = ?2",
+        rusqlite::params![placeholder_id, real_session_id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM sessions WHERE session_id = ?1",
+        [&placeholder_id],
+    );
+}
+
+/// One-time cleanup: drop any `tmux:<name>` placeholder that has been superseded
+/// by a real session row sharing the same `tmux_session`. Runs on every
+/// `open_db` and is idempotent — does nothing once the database is clean.
+fn cleanup_orphan_placeholders(conn: &Connection) {
+    let mut stmt = match conn.prepare(
+        "SELECT session_id, tmux_session FROM sessions
+         WHERE session_id LIKE 'tmux:%' AND tmux_session IS NOT NULL AND tmux_session != ''",
+    ) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let placeholders: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default();
+
+    for (placeholder_id, tmux_name) in placeholders {
+        let real_id: Option<String> = conn
+            .query_row(
+                "SELECT session_id FROM sessions
+                 WHERE session_id != ?1 AND tmux_session = ?2
+                 ORDER BY updated_at DESC LIMIT 1",
+                rusqlite::params![placeholder_id, tmux_name],
+                |r| r.get(0),
+            )
+            .ok();
+        if let Some(real_id) = real_id {
+            adopt_placeholder(conn, &real_id, &tmux_name);
+        }
+    }
 }
 
 fn read_context_from_transcript(path: &str) -> Option<(i64, i64)> {
@@ -355,42 +427,7 @@ fn process_hook_event(conn: &Connection, input_str: &str, tmux_session: &str) {
     let detail = extract_detail(&input);
     let cwd = input.cwd.as_deref().unwrap_or("");
 
-    // On SessionStart, adopt any placeholder from `cj init`
-    if event == "SessionStart" && !tmux_session.is_empty() {
-        let placeholder_id = format!("tmux:{}", tmux_session);
-        let topic: Option<String> = conn
-            .query_row(
-                "SELECT topic FROM sessions WHERE session_id = ?1",
-                [&placeholder_id],
-                |row| row.get(0),
-            )
-            .ok()
-            .flatten();
-
-        if let Some(ref topic_val) = topic {
-            // Move milestones from placeholder to real session
-            let _ = conn.execute(
-                "UPDATE milestones SET session_id = ?1 WHERE session_id = ?2",
-                rusqlite::params![session_id, placeholder_id],
-            );
-            // Delete placeholder
-            let _ = conn.execute(
-                "DELETE FROM sessions WHERE session_id = ?1",
-                [&placeholder_id],
-            );
-            // Insert real session with adopted topic
-            conn.execute(
-                "INSERT INTO sessions (session_id, status, tool_name, detail, cwd, tmux_session, topic, started_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                 ON CONFLICT(session_id) DO UPDATE SET status=excluded.status, tool_name=excluded.tool_name, detail=excluded.detail, cwd=excluded.cwd, tmux_session=excluded.tmux_session, topic=excluded.topic, updated_at=CURRENT_TIMESTAMP",
-                rusqlite::params![session_id, status, tool, detail, cwd, tmux_session, topic_val],
-            )
-            .unwrap();
-            return;
-        }
-    }
-
-    // Normal upsert — preserve existing topic
+    // Upsert the session row — preserve existing topic.
     conn.execute(
         "INSERT INTO sessions (session_id, status, tool_name, detail, cwd, tmux_session, started_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -407,6 +444,12 @@ fn process_hook_event(conn: &Connection, input_str: &str, tmux_session: &str) {
             );
         }
     }
+
+    // Adopt any placeholder (`tmux:<name>`) sitting on this tmux session,
+    // whether it was created by `cj init` or `cj import`. Runs on every event
+    // so an already-running Claude session imported via `cj import` clears
+    // its placeholder on the next hook fire — not only on SessionStart.
+    adopt_placeholder(conn, &session_id, tmux_session);
 }
 
 fn db_get_context(conn: &Connection, session_id: &str) -> Option<(i64, i64)> {
@@ -1745,6 +1788,141 @@ mod tests {
             )
             .unwrap();
         assert_eq!(topic, "my goal");
+    }
+
+    #[test]
+    fn hook_cleans_up_topicless_import_placeholder_on_any_event() {
+        let conn = fresh_db();
+        // `cj import` placeholder — no topic
+        conn.execute(
+            "INSERT INTO sessions (session_id, status, tmux_session, started_at, updated_at)
+             VALUES ('tmux:my-tmux', 'pending', 'my-tmux', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+
+        // PreToolUse (not SessionStart) from the already-running Claude session
+        let payload =
+            r#"{"session_id":"real-uuid","hook_event_name":"PreToolUse","tool_name":"Read"}"#;
+        process_hook_event(&conn, payload, "my-tmux");
+
+        let placeholder_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE session_id='tmux:my-tmux'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(placeholder_count, 0);
+    }
+
+    #[test]
+    fn hook_migrates_placeholder_milestones_to_real_session() {
+        let conn = fresh_db();
+        conn.execute(
+            "INSERT INTO sessions (session_id, status, tmux_session, started_at, updated_at)
+             VALUES ('tmux:my-tmux', 'pending', 'my-tmux', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO milestones (session_id, summary) VALUES ('tmux:my-tmux', 'wrote tests')",
+            [],
+        )
+        .unwrap();
+
+        let payload = r#"{"session_id":"real-uuid","hook_event_name":"PostToolUse"}"#;
+        process_hook_event(&conn, payload, "my-tmux");
+
+        let owner: String = conn
+            .query_row(
+                "SELECT session_id FROM milestones WHERE summary='wrote tests'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(owner, "real-uuid");
+    }
+
+    #[test]
+    fn hook_does_not_overwrite_existing_real_topic_with_placeholder_topic() {
+        let conn = fresh_db();
+        // Real session already has a topic (set via `cj topic` earlier).
+        conn.execute(
+            "INSERT INTO sessions (session_id, status, tmux_session, topic, started_at, updated_at)
+             VALUES ('real-uuid', 'working', 'my-tmux', 'real topic', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+        // Stale placeholder with a different topic.
+        conn.execute(
+            "INSERT INTO sessions (session_id, status, tmux_session, topic, started_at, updated_at)
+             VALUES ('tmux:my-tmux', 'pending', 'my-tmux', 'stale placeholder topic', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+
+        let payload = r#"{"session_id":"real-uuid","hook_event_name":"PreToolUse"}"#;
+        process_hook_event(&conn, payload, "my-tmux");
+
+        let topic: String = conn
+            .query_row(
+                "SELECT topic FROM sessions WHERE session_id='real-uuid'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(topic, "real topic");
+    }
+
+    // ----- cleanup_orphan_placeholders -----
+
+    #[test]
+    fn cleanup_drops_placeholder_when_real_session_exists() {
+        let conn = fresh_db();
+        // Reproduce the production bug: import created a placeholder for an
+        // already-running Claude session, then hooks fired without an adoption.
+        insert_session(&conn, "real-uuid", "my-tmux", "waiting");
+        conn.execute(
+            "INSERT INTO sessions (session_id, status, tmux_session, started_at, updated_at)
+             VALUES ('tmux:my-tmux', 'pending', 'my-tmux', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+
+        cleanup_orphan_placeholders(&conn);
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE tmux_session='my-tmux'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn cleanup_keeps_placeholder_with_no_matching_real_session() {
+        let conn = fresh_db();
+        // A `cj init` placeholder for a tmux that Claude hasn't started in yet.
+        conn.execute(
+            "INSERT INTO sessions (session_id, status, tmux_session, topic, started_at, updated_at)
+             VALUES ('tmux:future-tmux', 'pending', 'future-tmux', 'planned work', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+
+        cleanup_orphan_placeholders(&conn);
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE session_id='tmux:future-tmux'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]
