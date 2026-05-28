@@ -47,6 +47,7 @@ cj -q                       Launch TUI, quit after selecting a session
 cj init [-s name] <topic>   Pre-register session with topic before Claude starts
 cj topic <text>             Set topic for the current session
 cj milestone <text>         Add milestone to the current session
+cj context                  Print context usage as `used/total` tokens
 cj remove <tmux-session>    Remove all sessions for a tmux session
 cj hook                     Process hook event from stdin (used internally)
 cj -h                       Show help
@@ -83,3 +84,9 @@ The installer adds instructions to `~/.claude/CLAUDE.md` that tell Claude to run
 - `cj milestone "what was accomplished"` after completing a significant step
 
 These show up in the dashboard under each session. Topics appear in bold, milestones with a ⚑ marker and timestamp. Press `o` to see the full milestone history for a session.
+
+## Context window usage
+
+Each session also tracks its token context usage automatically. The cj hook parses the session's transcript on every Claude Code event and stores `context_used` / `context_total` in the database. The TUI shows a mini progress bar (▓▓▓░░░░░ 38%) next to each session — green under 60%, yellow from 60–80%, red above 80%.
+
+Run `cj context` to print the current session's usage as `used/total` (e.g. `150234/200000`). Useful for tmux status lines or piping into other tools. Defaults to 200K context; auto-bumps to 1M if observed usage exceeds 200K.

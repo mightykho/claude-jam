@@ -31,6 +31,8 @@ struct Session {
     tmux_session: Option<String>,
     topic: Option<String>,
     updated_at: String,
+    context_used: Option<i64>,
+    context_total: Option<i64>,
 }
 
 struct Milestone {
@@ -161,7 +163,42 @@ fn open_db() -> rusqlite::Result<Connection> {
     )?;
     // Migrations for existing DBs
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN topic TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN context_used INTEGER;");
+    let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN context_total INTEGER;");
     Ok(conn)
+}
+
+fn read_context_from_transcript(path: &str) -> Option<(i64, i64)> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut latest: Option<i64> = None;
+    for line in content.lines().rev() {
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            continue;
+        }
+        let usage = match v.get("message").and_then(|m| m.get("usage")) {
+            Some(u) => u,
+            None => continue,
+        };
+        let input = usage.get("input_tokens").and_then(|n| n.as_i64()).unwrap_or(0);
+        let cache_c = usage
+            .get("cache_creation_input_tokens")
+            .and_then(|n| n.as_i64())
+            .unwrap_or(0);
+        let cache_r = usage
+            .get("cache_read_input_tokens")
+            .and_then(|n| n.as_i64())
+            .unwrap_or(0);
+        let output = usage.get("output_tokens").and_then(|n| n.as_i64()).unwrap_or(0);
+        latest = Some(input + cache_c + cache_r + output);
+        break;
+    }
+    let used = latest?;
+    let total = if used > 200_000 { 1_000_000 } else { 200_000 };
+    Some((used, total))
 }
 
 fn current_tmux_session() -> Option<String> {
@@ -245,6 +282,7 @@ struct HookInput {
     cwd: Option<String>,
     prompt: Option<String>,
     message: Option<String>,
+    transcript_path: Option<String>,
 }
 
 fn event_to_status(event: &str) -> &str {
@@ -344,6 +382,55 @@ fn cmd_hook(conn: &Connection) {
         rusqlite::params![session_id, status, tool, detail, cwd, tmux_session],
     )
     .unwrap();
+
+    if let Some(ref tp) = input.transcript_path {
+        if let Some((used, total)) = read_context_from_transcript(tp) {
+            let _ = conn.execute(
+                "UPDATE sessions SET context_used = ?1, context_total = MAX(COALESCE(context_total, 0), ?2) WHERE session_id = ?3",
+                rusqlite::params![used, total, session_id],
+            );
+        }
+    }
+}
+
+fn cmd_context(conn: &Connection, session_id_override: Option<&str>) {
+    let session_id = resolve_session_id(conn, session_id_override);
+    let row: Option<(Option<i64>, Option<i64>)> = conn
+        .query_row(
+            "SELECT context_used, context_total FROM sessions WHERE session_id = ?1",
+            [&session_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    match row {
+        Some((Some(used), Some(total))) => println!("{}/{}", used, total),
+        _ => {
+            eprintln!("No context info available for session {}", session_id);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn format_context_bar(used: i64, total: i64) -> Option<(String, Color)> {
+    if total <= 0 {
+        return None;
+    }
+    let pct = ((used.max(0) as f64 / total as f64) * 100.0).min(100.0) as i64;
+    const WIDTH: usize = 8;
+    let filled = ((pct as usize * WIDTH) / 100).min(WIDTH);
+    let bar = format!(
+        "{}{}",
+        "▓".repeat(filled),
+        "░".repeat(WIDTH - filled)
+    );
+    let color = if pct >= 80 {
+        Color::Red
+    } else if pct >= 60 {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
+    Some((format!("{} {}%", bar, pct), color))
 }
 
 fn cmd_milestone(conn: &Connection, session_id_override: Option<&str>, text: &str) {
@@ -359,7 +446,7 @@ fn cmd_milestone(conn: &Connection, session_id_override: Option<&str>, text: &st
 fn fetch_sessions(conn: &Connection) -> Vec<Session> {
     let mut stmt = conn
         .prepare(
-            "SELECT session_id, status, tool_name, detail, cwd, tmux_session, topic, updated_at
+            "SELECT session_id, status, tool_name, detail, cwd, tmux_session, topic, updated_at, context_used, context_total
              FROM sessions
              WHERE status != 'offline'
              ORDER BY started_at DESC",
@@ -376,6 +463,8 @@ fn fetch_sessions(conn: &Connection) -> Vec<Session> {
             tmux_session: row.get(5)?,
             topic: row.get(6)?,
             updated_at: row.get(7)?,
+            context_used: row.get(8)?,
+            context_total: row.get(9)?,
         })
     })
     .unwrap()
@@ -505,6 +594,18 @@ impl App {
     }
 }
 
+fn truncate_chars(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 fn shortcut_label(i: usize) -> String {
     match i {
         0..=8 => format!("{}", i + 1),
@@ -538,7 +639,7 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
             let label = shortcut_label(i);
             let mut lines = vec![];
 
-            // Line 1: shortcut + emoji + project name + tmux session + time + current tool
+            // Line 1: shortcut + emoji + project name + tmux session + time + context bar + current tool
             let mut header_spans = vec![
                 Span::styled(format!("{} ", label), Style::default().fg(Color::Cyan)),
                 Span::styled(format!("{} ", emoji), Style::default()),
@@ -548,6 +649,16 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
                 ),
                 Span::styled(format!("  {}", time), Style::default().fg(Color::Gray)),
             ];
+
+            let ctx_bar = s
+                .context_used
+                .zip(s.context_total)
+                .and_then(|(u, t)| format_context_bar(u, t));
+            let ctx_len = ctx_bar.as_ref().map(|(s, _)| s.chars().count() + 2).unwrap_or(0);
+            if let Some((ref bar, bar_color)) = ctx_bar {
+                header_spans.push(Span::raw("  "));
+                header_spans.push(Span::styled(bar.clone(), Style::default().fg(bar_color)));
+            }
 
             // Append current tool+detail after dash
             let activity = if s.status == "idle" {
@@ -564,13 +675,22 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
                 }
             };
             if !activity.is_empty() {
-                let max_activity = width.saturating_sub(label.len() + 2 + emoji.len() + 1 + tmux.len() + 2 + time.len() + 5);
-                let activity_display = if activity.len() > max_activity {
-                    format!("{}…", &activity[..max_activity.saturating_sub(1)])
-                } else {
-                    activity
-                };
-                header_spans.push(Span::styled(format!(" — {}", activity_display), Style::default().fg(Color::DarkGray)));
+                let max_activity = width.saturating_sub(
+                    label.chars().count()
+                        + 2
+                        + emoji.chars().count()
+                        + 1
+                        + tmux.chars().count()
+                        + 2
+                        + time.chars().count()
+                        + ctx_len
+                        + 5,
+                );
+                let activity_display = truncate_chars(&activity, max_activity);
+                header_spans.push(Span::styled(
+                    format!(" — {}", activity_display),
+                    Style::default().fg(Color::DarkGray),
+                ));
             }
 
             lines.push(Line::from(header_spans));
@@ -580,11 +700,7 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
 
             if let Some(ref topic) = s.topic {
                 let max_topic = width.saturating_sub(4);
-                let topic_display = if topic.len() > max_topic {
-                    format!("{}…", &topic[..max_topic.saturating_sub(1)])
-                } else {
-                    topic.clone()
-                };
+                let topic_display = truncate_chars(topic, max_topic);
                 lines.push(Line::from(vec![
                     Span::styled("  │ ", Style::default().fg(Color::Gray)),
                     Span::styled(topic_display, Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
@@ -595,12 +711,8 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
             if let Some(ref ms) = latest_milestone {
                 let ms_time = relative_time(&ms.created_at);
                 let prefix = if s.topic.is_some() { "  ├ " } else { "  │ " };
-                let max_ms = width.saturating_sub(ms_time.len() + 8);
-                let ms_display = if ms.summary.len() > max_ms {
-                    format!("{}…", &ms.summary[..max_ms.saturating_sub(1)])
-                } else {
-                    ms.summary.clone()
-                };
+                let max_ms = width.saturating_sub(ms_time.chars().count() + 8);
+                let ms_display = truncate_chars(&ms.summary, max_ms);
                 lines.push(Line::from(vec![
                     Span::styled(prefix, Style::default().fg(Color::Gray)),
                     Span::styled("⚑ ", Style::default().fg(Color::Magenta)),
@@ -614,12 +726,8 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
                 let all_milestones = fetch_milestones(conn, &s.session_id);
                 for (mi, ms) in all_milestones.iter().enumerate().skip(1) {
                     let ms_time = relative_time(&ms.created_at);
-                    let max_ms = width.saturating_sub(ms_time.len() + 10);
-                    let ms_display = if ms.summary.len() > max_ms {
-                        format!("{}…", &ms.summary[..max_ms.saturating_sub(1)])
-                    } else {
-                        ms.summary.clone()
-                    };
+                    let max_ms = width.saturating_sub(ms_time.chars().count() + 10);
+                    let ms_display = truncate_chars(&ms.summary, max_ms);
                     let connector = if mi == all_milestones.len() - 1 {
                         "  └ "
                     } else {
@@ -690,6 +798,13 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
 }
 
 fn run_tui(conn: &Connection, quit_on_select: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        default_hook(info);
+    }));
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -812,6 +927,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  cj init [-s name] <topic>  Pre-register session with topic (-s for explicit tmux session)");
         println!("  cj topic [--session-id <id>] <text>      Set topic (auto-detects via tmux, or use --session-id)");
         println!("  cj milestone [--session-id <id>] <text>  Add milestone (auto-detects via tmux, or use --session-id)");
+        println!("  cj context [--session-id <id>]           Print context usage as 'used/total' tokens");
         println!("  cj remove <tmux>     Remove all sessions for a tmux session");
         println!("  cj hook              Process hook event from stdin (used by claude-jam.sh)");
         println!();
@@ -879,6 +995,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
             cmd_milestone(&conn, sid_override, &text);
+        }
+        Some("context") => {
+            let rest = &args[2..];
+            let sid_override = if rest.len() >= 2 && rest[0] == "--session-id" {
+                Some(rest[1].as_str())
+            } else {
+                None
+            };
+            cmd_context(&conn, sid_override);
         }
         _ => {
             let quit_on_select = args.iter().any(|a| a == "-q" || a == "--quit");
