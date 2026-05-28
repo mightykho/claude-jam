@@ -3,6 +3,22 @@ set -e
 
 # Claude Jam installer
 # Sets up the binary, hooks, and Claude Code integration.
+#
+# Usage:
+#   ./install.sh         End-user install (copies the binary into ~/bin)
+#   ./install.sh --dev   Developer install (symlinks ~/bin/cj to the build
+#                        output so `cargo build --release` alone refreshes
+#                        the running binary)
+
+DEV_MODE=0
+for arg in "$@"; do
+    case "$arg" in
+        --dev) DEV_MODE=1 ;;
+        -h|--help)
+            sed -n '4,11p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0 ;;
+    esac
+done
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 CLAUDE_DIR="$HOME/.claude"
@@ -11,7 +27,7 @@ SETTINGS_FILE="$CLAUDE_DIR/settings.json"
 HOOK_SCRIPT="$HOOKS_DIR/claude-jam.sh"
 BIN_DIR="$HOME/bin"
 BINARY_NAME="cj"
-PREBUILT="$REPO_DIR/target/release/claude-jam"
+PREBUILT="$REPO_DIR/target/release/cj"
 
 echo "Installing Claude Jam..."
 echo ""
@@ -39,9 +55,14 @@ if [ -L "$BIN_DIR/$BINARY_NAME" ] || [ -f "$BIN_DIR/$BINARY_NAME" ]; then
     rm "$BIN_DIR/$BINARY_NAME"
 fi
 
-cp "$PREBUILT" "$BIN_DIR/$BINARY_NAME"
-chmod +x "$BIN_DIR/$BINARY_NAME"
-echo "[ok] Installed $BIN_DIR/$BINARY_NAME"
+if [ "$DEV_MODE" = "1" ]; then
+    ln -s "$PREBUILT" "$BIN_DIR/$BINARY_NAME"
+    echo "[ok] Symlinked $BIN_DIR/$BINARY_NAME -> $PREBUILT (dev mode)"
+else
+    cp "$PREBUILT" "$BIN_DIR/$BINARY_NAME"
+    chmod +x "$BIN_DIR/$BINARY_NAME"
+    echo "[ok] Installed $BIN_DIR/$BINARY_NAME"
+fi
 
 if ! command -v "$BINARY_NAME" &>/dev/null; then
     echo "[warn] $BIN_DIR is not on your PATH. Add it:"

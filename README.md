@@ -1,92 +1,169 @@
 # Claude Jam
 
-A TUI dashboard for monitoring and switching between multiple concurrent Claude Code sessions.
+A fancy tmux window switcher for modern agentic workflows.
 
-Claude Jam hooks into Claude Code's lifecycle events to track what each session is doing in real time — which tool it's running, whether it's waiting for input, or if it's done. Sessions are displayed in a compact list with emoji status indicators, topic descriptions, and milestone history.
+[![CI](https://github.com/your-org/claude-jam/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/claude-jam/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## How it works
+Claude Jam hooks into Claude Code's lifecycle events to track what each session is doing in real time — which tool it's running, whether it's waiting for input, how full its context window is, or whether it's done. Sessions appear in a compact list you can jump between with one keystroke.
 
-A lightweight hook script pipes Claude Code events (session start, tool use, notifications, etc.) into a shared SQLite database. The TUI reads from this database and refreshes every second. Each session shows:
-
-- Status emoji: 🔨 working, 🔔 waiting for input, ✅ done, 💤 stale, ⏳ pending
-- tmux session name and relative timestamp
-- Current tool and detail (e.g. `Read src/main.rs`)
-- Topic and milestone history (set by Claude via `cj topic` / `cj milestone`)
-
-Press Enter on any session to switch to its tmux session. Press `o` to expand milestone history.
+```
+┌─ Claude Jam ───────────────────────────────────────────────────────────┐
+│ 1 🔨 my-app          ▓▓▓░░░░░ 38%   12s ago — Read src/main.rs         │
+│   │ Implement auth middleware                                          │
+│   ├ ⚑ Added JWT verification   3m ago                                  │
+│                                                                        │
+│ 2 🔔 docs-site       ▓▓▓▓▓▓░░ 72%   1m ago  — waiting for input        │
+│   │ Migrate to MDX                                                     │
+│                                                                        │
+│ 3 ✅ infra           ▓▓▓░░░░░ 41%   8m ago  — Done                     │
+└────────────────────────────────────────────────────────────────────────┘
+```
 
 ## Install
 
 ```bash
-git clone <repo-url> && cd claude-jam
-cargo build --release
+git clone https://github.com/your-org/claude-jam && cd claude-jam
 ./install.sh
 ```
 
-If Rust is installed, `install.sh` will build automatically if no prebuilt binary exists. The installer:
+If a prebuilt binary isn't present, `install.sh` will run `cargo build --release` for you (Rust toolchain required for that path).
 
-- Copies the binary to `~/bin/cj`
+The installer:
+
+- Builds and installs the `cj` binary to `~/bin/cj`
 - Creates the hook script at `~/.claude/hooks/claude-jam.sh`
-- Registers hooks for all Claude Code lifecycle events in `~/.claude/settings.json`
-- Adds `Bash(cj:*)` to allowed permissions so Claude can run `cj` commands
-- Adds instructions to `~/.claude/CLAUDE.md` so Claude knows to report topics and milestones
+- Registers `cj hook` against every Claude Code lifecycle event in `~/.claude/settings.json`
+- Adds `Bash(cj:*)` to allowed permissions so Claude can run `cj` commands without prompting
+- Adds a short instruction to `~/.claude/CLAUDE.md` so Claude knows to report topics and milestones
 
-## Uninstall
-
-```bash
-./uninstall.sh
-```
-
-Removes the binary, hook, settings entries, and CLAUDE.md instructions. The SQLite database at `~/.claude/claude-jam.db` is kept — delete it manually if you want a clean slate.
+To uninstall, run `./uninstall.sh`. The SQLite database at `~/.claude/claude-jam.db` is preserved — delete it manually for a clean slate.
 
 ## Usage
 
 ```
-cj                          Launch TUI dashboard
-cj -q                       Launch TUI, quit after selecting a session
-cj init [-s name] <topic>   Pre-register session with topic before Claude starts
-cj topic <text>             Set topic for the current session
-cj milestone <text>         Add milestone to the current session
-cj context                  Print context usage as `used/total` tokens
-cj remove <tmux-session>    Remove all sessions for a tmux session
-cj hook                     Process hook event from stdin (used internally)
-cj -h                       Show help
+cj                                       Launch TUI dashboard
+cj -q                                    Launch TUI, quit after selecting a session
+cj -b                                    Borderless mode (no title bar or border)
+cj -v                                    Vertical mode (detail line below the title)
+cj init [-s <tmux>] <topic>              Pre-register a session with a topic
+cj topic [--session-id <id>] <text>      Set the topic for a session
+cj milestone [--session-id <id>] <text>  Add a milestone to a session
+cj context [--session-id <id>]           Print "used/total" context tokens
+cj import                                Import all current tmux sessions
+cj remove <tmux-session>                 Drop all sessions matching a tmux name
+cj hook                                  Process a hook event from stdin (used internally)
+cj -h                                    Show help
 ```
 
-## TUI keybindings
+### TUI keybindings
 
 | Key | Action |
 |-----|--------|
 | `j` / `k` | Navigate sessions |
-| `1`-`9` | Jump to session by number |
+| `1`–`9` | Jump to session by number |
 | `Ctrl-a`..`Ctrl-z` | Jump to session by letter (after 9) |
-| `Enter` | Switch to session's tmux session |
+| `Enter` | Switch to the session's tmux session |
 | `o` | Expand/collapse milestone history |
-| `d` | Delete session |
-| `q` | Quit |
+| `d` | Delete session (Y/N confirmation popup) |
+| `q` / `Esc` | Quit |
+
+## How it works
+
+Claude Code lets you register hooks for lifecycle events (`SessionStart`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`, etc.). When you install Claude Jam, it registers a single hook command — `cj hook` — for every event.
+
+```
+       ┌────────────────────┐
+       │  Claude Code (×N)  │ — one per tmux pane / window
+       └────────┬───────────┘
+                │  hook events as JSON over stdin
+                ▼
+       ┌────────────────────┐
+       │   cj hook          │ — short-lived process per event
+       └────────┬───────────┘
+                │  upsert + transcript parse
+                ▼
+       ┌────────────────────┐
+       │ ~/.claude/         │
+       │ claude-jam.db      │ — shared SQLite (WAL mode)
+       └────────┬───────────┘
+                │  reads, refreshes 1×/s
+                ▼
+       ┌────────────────────┐
+       │   cj  (TUI)        │ — reader, never writes
+       └────────────────────┘
+```
+
+Each event invocation does three things:
+
+1. **Upserts the session row** — derives a status from the event name (`PreToolUse → working`, `Notification → waiting`, `Stop → idle`, `SessionEnd → offline`), extracts the most useful detail from the tool input (command for Bash, file_path for Read, pattern for Grep, fallback to the prompt or notification message), and writes it next to the tmux session name.
+2. **Parses the transcript** — Claude Code passes the path to the session's JSONL transcript on every event. The hook reads it backwards to find the latest assistant message, sums `input + cache_creation + cache_read + output` tokens, and writes that to `context_used`. The `context_total` defaults to 200K and auto-bumps to 1M once observed usage exceeds 200K (this is the only reliable signal — the transcript doesn't expose the model's actual context window).
+3. **Adopts placeholders** — if you ran `cj init <topic>` before starting Claude in a tmux session, the hook detects the matching placeholder on `SessionStart` and migrates its topic onto the real session row.
+
+The TUI is a strict reader: it polls the SQLite database once a second, never writes, and decorates the rows with status colors and a 8-cell context bar. Pressing Enter shells out to `tmux switch-client -t <name>` so the keystroke takes you straight to the session's pane.
+
+The schema is tiny — two tables (`sessions`, `milestones`) — and migrations are idempotent `ALTER TABLE ADD COLUMN` statements wrapped in `let _ =` so re-runs are no-ops. The database is local-only; no network calls anywhere in the project.
 
 ## tmux integration (optional)
 
-Bind `cj` to a tmux key for quick access. Add to your `~/.tmux.conf`:
+Bind `cj` to a tmux key for quick access:
 
 ```tmux
-# Leader-w opens Claude Jam in a popup (auto-closes on session select)
+# Prefix-w opens Claude Jam in a popup (auto-closes on selection)
 bind w display-popup -E "cj -q"
 ```
 
-Reload with `tmux source-file ~/.tmux.conf`. Now `<prefix> w` opens a popup showing all Claude sessions — select one and it switches immediately.
+Reload with `tmux source-file ~/.tmux.conf`. Now `<prefix> w` shows every active Claude session — pick one and tmux jumps straight to it.
 
-## How Claude reports context
+You can also feed `cj context` into your tmux status line for a context-window indicator across all sessions.
 
-The installer adds instructions to `~/.claude/CLAUDE.md` that tell Claude to run:
+## Reporting topics and milestones
+
+The installer adds an instruction to `~/.claude/CLAUDE.md` telling Claude to run:
 
 - `cj topic "description"` when it understands the main goal of a session
 - `cj milestone "what was accomplished"` after completing a significant step
 
-These show up in the dashboard under each session. Topics appear in bold, milestones with a ⚑ marker and timestamp. Press `o` to see the full milestone history for a session.
+These appear under the session in the dashboard. Topics render in bold, milestones with a `⚑` marker and a timestamp. Press `o` on a selected session to expand its full milestone history.
 
-## Context window usage
+If you want to seed a session before Claude even starts (e.g. when opening a fresh tmux window), use `cj init` and the topic gets adopted automatically when Claude fires its `SessionStart` event:
 
-Each session also tracks its token context usage automatically. The cj hook parses the session's transcript on every Claude Code event and stores `context_used` / `context_total` in the database. The TUI shows a mini progress bar (▓▓▓░░░░░ 38%) next to each session — green under 60%, yellow from 60–80%, red above 80%.
+```bash
+tmux new-session -s my-feature
+cj init "wire up the new billing endpoint"
+claude  # SessionStart fires, topic moves onto the real session row
+```
 
-Run `cj context` to print the current session's usage as `used/total` (e.g. `150234/200000`). Useful for tmux status lines or piping into other tools. Defaults to 200K context; auto-bumps to 1M if observed usage exceeds 200K.
+## Development
+
+```bash
+# Run tests
+cargo test --release
+
+# Format and lint
+cargo fmt --all
+cargo clippy --all-targets -- -D warnings
+
+# Dev install — symlink ~/bin/cj to the build output so
+# `cargo build --release` alone refreshes the running binary
+./install.sh --dev
+```
+
+The codebase lives in a single `src/main.rs` (~1.5K lines) split into clear sections — time helpers, schema/migrations, transcript parsing, command handlers, and the TUI render loop. Database access uses `rusqlite` with the bundled SQLite, so there's no system dependency beyond `tmux` for the integration tests / switching keystrokes.
+
+Tests live in `#[cfg(test)] mod tests` at the bottom of `main.rs`. They cover the pure helpers (truncation, bar rendering, transcript parsing) and the DB-touching logic (`process_hook_event`, `db_import_tmux_sessions`, `db_get_context`) against an in-memory SQLite via `Connection::open_in_memory()`. CI runs `fmt --check`, `clippy -D warnings`, and `cargo test` on Linux and macOS.
+
+## Contributing
+
+PRs welcome. The bar to clear before opening one:
+
+- `cargo fmt --all -- --check` is clean
+- `cargo clippy --all-targets -- -D warnings` is clean
+- `cargo test --release` passes
+- New behavior has a test (the hook flow especially — it's the load-bearing piece)
+
+Issues and feature requests are equally welcome — open one with a short reproduction or describe the use case.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

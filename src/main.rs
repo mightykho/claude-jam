@@ -11,10 +11,10 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::layout::Rect;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::{Frame, Terminal};
 use rusqlite::Connection;
@@ -68,9 +68,7 @@ fn status_color(status: &str, is_stale: bool) -> Color {
 }
 
 fn parse_timestamp(updated_at: &str) -> i64 {
-    let parts: Vec<&str> = updated_at
-        .split(|c| c == '-' || c == ' ' || c == ':')
-        .collect();
+    let parts: Vec<&str> = updated_at.split(['-', ' ', ':']).collect();
     if parts.len() < 6 {
         return 0;
     }
@@ -96,8 +94,8 @@ fn parse_timestamp(updated_at: &str) -> i64 {
         };
     }
     let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    for m in 0..(month - 1) as usize {
-        total_days += days_in_month[m];
+    for (m, &days) in days_in_month.iter().enumerate().take((month - 1) as usize) {
+        total_days += days;
         if m == 1 && is_leap {
             total_days += 1;
         }
@@ -138,8 +136,7 @@ fn db_path() -> PathBuf {
         .join("claude-jam.db")
 }
 
-fn open_db() -> rusqlite::Result<Connection> {
-    let conn = Connection::open(db_path())?;
+fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
          PRAGMA busy_timeout=3000;
@@ -162,10 +159,16 @@ fn open_db() -> rusqlite::Result<Connection> {
              FOREIGN KEY (session_id) REFERENCES sessions(session_id)
          );",
     )?;
-    // Migrations for existing DBs
+    // Idempotent migrations for older databases — ignore "duplicate column" errors.
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN topic TEXT;");
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN context_used INTEGER;");
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN context_total INTEGER;");
+    Ok(())
+}
+
+fn open_db() -> rusqlite::Result<Connection> {
+    let conn = Connection::open(db_path())?;
+    init_schema(&conn)?;
     Ok(conn)
 }
 
@@ -184,7 +187,10 @@ fn read_context_from_transcript(path: &str) -> Option<(i64, i64)> {
             Some(u) => u,
             None => continue,
         };
-        let input = usage.get("input_tokens").and_then(|n| n.as_i64()).unwrap_or(0);
+        let input = usage
+            .get("input_tokens")
+            .and_then(|n| n.as_i64())
+            .unwrap_or(0);
         let cache_c = usage
             .get("cache_creation_input_tokens")
             .and_then(|n| n.as_i64())
@@ -193,7 +199,10 @@ fn read_context_from_transcript(path: &str) -> Option<(i64, i64)> {
             .get("cache_read_input_tokens")
             .and_then(|n| n.as_i64())
             .unwrap_or(0);
-        let output = usage.get("output_tokens").and_then(|n| n.as_i64()).unwrap_or(0);
+        let output = usage
+            .get("output_tokens")
+            .and_then(|n| n.as_i64())
+            .unwrap_or(0);
         latest = Some(input + cache_c + cache_r + output);
         break;
     }
@@ -209,7 +218,11 @@ fn current_tmux_session() -> Option<String> {
         .ok()
         .and_then(|o| {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         })
 }
 
@@ -324,8 +337,12 @@ fn extract_detail(input: &HookInput) -> String {
 fn cmd_hook(conn: &Connection) {
     let mut input_str = String::new();
     io::stdin().read_to_string(&mut input_str).unwrap_or(0);
+    let tmux_session = current_tmux_session().unwrap_or_default();
+    process_hook_event(conn, &input_str, &tmux_session);
+}
 
-    let input: HookInput = serde_json::from_str(&input_str).unwrap_or_default();
+fn process_hook_event(conn: &Connection, input_str: &str, tmux_session: &str) {
+    let input: HookInput = serde_json::from_str(input_str).unwrap_or_default();
 
     let session_id = match input.session_id {
         Some(ref id) if !id.is_empty() => id.clone(),
@@ -337,8 +354,6 @@ fn cmd_hook(conn: &Connection) {
     let tool = input.tool_name.as_deref().unwrap_or("");
     let detail = extract_detail(&input);
     let cwd = input.cwd.as_deref().unwrap_or("");
-
-    let tmux_session = current_tmux_session().unwrap_or_default();
 
     // On SessionStart, adopt any placeholder from `cj init`
     if event == "SessionStart" && !tmux_session.is_empty() {
@@ -394,18 +409,21 @@ fn cmd_hook(conn: &Connection) {
     }
 }
 
+fn db_get_context(conn: &Connection, session_id: &str) -> Option<(i64, i64)> {
+    conn.query_row(
+        "SELECT context_used, context_total FROM sessions WHERE session_id = ?1",
+        [session_id],
+        |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?)),
+    )
+    .ok()
+    .and_then(|(u, t)| Some((u?, t?)))
+}
+
 fn cmd_context(conn: &Connection, session_id_override: Option<&str>) {
     let session_id = resolve_session_id(conn, session_id_override);
-    let row: Option<(Option<i64>, Option<i64>)> = conn
-        .query_row(
-            "SELECT context_used, context_total FROM sessions WHERE session_id = ?1",
-            [&session_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .ok();
-    match row {
-        Some((Some(used), Some(total))) => println!("{}/{}", used, total),
-        _ => {
+    match db_get_context(conn, &session_id) {
+        Some((used, total)) => println!("{}/{}", used, total),
+        None => {
             eprintln!("No context info available for session {}", session_id);
             std::process::exit(1);
         }
@@ -419,11 +437,7 @@ fn format_context_bar(used: i64, total: i64) -> Option<(String, Color)> {
     let pct = ((used.max(0) as f64 / total as f64) * 100.0).min(100.0) as i64;
     const WIDTH: usize = 8;
     let filled = ((pct as usize * WIDTH) / 100).min(WIDTH);
-    let bar = format!(
-        "{}{}",
-        "▓".repeat(filled),
-        "░".repeat(WIDTH - filled)
-    );
+    let bar = format!("{}{}", "▓".repeat(filled), "░".repeat(WIDTH - filled));
     let color = if pct >= 80 {
         Color::Red
     } else if pct >= 60 {
@@ -508,32 +522,28 @@ fn delete_session(conn: &Connection, session_id: &str) {
     let _ = conn.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id]);
 }
 
-fn cmd_import(conn: &Connection) {
+fn list_tmux_sessions() -> Option<Vec<String>> {
     let output = Command::new("tmux")
         .args(["list-sessions", "-F", "#{session_name}"])
-        .output();
-
-    let tmux_sessions: Vec<String> = match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
             .lines()
             .map(|s| s.to_string())
             .filter(|s| !s.is_empty())
             .collect(),
-        _ => {
-            eprintln!("Error: failed to list tmux sessions (is tmux running?)");
-            std::process::exit(1);
-        }
-    };
+    )
+}
 
-    if tmux_sessions.is_empty() {
-        println!("No tmux sessions found");
-        return;
-    }
-
+fn db_import_tmux_sessions(conn: &Connection, tmux_names: &[String]) -> (Vec<String>, Vec<String>) {
     let mut imported: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
 
-    for tmux in &tmux_sessions {
+    for tmux in tmux_names {
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sessions WHERE tmux_session = ?1 AND status != 'offline'",
@@ -562,6 +572,25 @@ fn cmd_import(conn: &Connection) {
             skipped.push(tmux.clone());
         }
     }
+
+    (imported, skipped)
+}
+
+fn cmd_import(conn: &Connection) {
+    let tmux_sessions = match list_tmux_sessions() {
+        Some(s) => s,
+        None => {
+            eprintln!("Error: failed to list tmux sessions (is tmux running?)");
+            std::process::exit(1);
+        }
+    };
+
+    if tmux_sessions.is_empty() {
+        println!("No tmux sessions found");
+        return;
+    }
+
+    let (imported, skipped) = db_import_tmux_sessions(conn, &tmux_sessions);
 
     if !imported.is_empty() {
         println!("Imported {} session(s):", imported.len());
@@ -723,9 +752,7 @@ fn render_delete_popup(frame: &mut Frame, area: Rect, session: &Session) {
     let block = Block::default()
         .title(Span::styled(
             " Delete session? ",
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Red));
@@ -763,9 +790,7 @@ fn render_delete_popup(frame: &mut Frame, area: Rect, session: &Session) {
         Span::raw("   "),
         Span::styled(
             "[N]",
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
         Span::styled("o", Style::default().fg(Color::Red)),
         Span::raw("   "),
@@ -820,7 +845,10 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
                 .context_used
                 .zip(s.context_total)
                 .and_then(|(u, t)| format_context_bar(u, t));
-            let bar_width = ctx_bar.as_ref().map(|(b, _)| b.chars().count() + 2).unwrap_or(0);
+            let bar_width = ctx_bar
+                .as_ref()
+                .map(|(b, _)| b.chars().count() + 2)
+                .unwrap_or(0);
 
             // Detail: context + time + activity
             let mut detail_spans: Vec<Span> = vec![];
@@ -886,21 +914,33 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
                 let topic_display = truncate_chars(topic, max_topic);
                 lines.push(Line::from(vec![
                     Span::styled("  │ ", Style::default().fg(Color::Gray)),
-                    Span::styled(topic_display, Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        topic_display,
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]));
             }
 
             // Line 3: latest milestone or tool+detail
             if let Some(ref ms) = latest_milestone {
                 let ms_time = relative_time(&ms.created_at);
-                let prefix = if s.topic.is_some() { "  ├ " } else { "  │ " };
+                let prefix = if s.topic.is_some() {
+                    "  ├ "
+                } else {
+                    "  │ "
+                };
                 let max_ms = width.saturating_sub(ms_time.chars().count() + 8);
                 let ms_display = truncate_chars(&ms.summary, max_ms);
                 lines.push(Line::from(vec![
                     Span::styled(prefix, Style::default().fg(Color::Gray)),
                     Span::styled("⚑ ", Style::default().fg(Color::Magenta)),
                     Span::styled(ms_display, Style::default().fg(Color::Gray)),
-                    Span::styled(format!("  {}", ms_time), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("  {}", ms_time),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ]));
             }
 
@@ -932,8 +972,7 @@ fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
             lines.push(Line::from(""));
 
             if i == app.selected {
-                ListItem::new(lines)
-                    .style(Style::default().bg(Color::Black).fg(Color::White))
+                ListItem::new(lines).style(Style::default().bg(Color::Black).fg(Color::White))
             } else {
                 ListItem::new(lines)
             }
@@ -1148,8 +1187,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  cj init [-s name] <topic>  Pre-register session with topic (-s for explicit tmux session)");
         println!("  cj topic [--session-id <id>] <text>      Set topic (auto-detects via tmux, or use --session-id)");
         println!("  cj milestone [--session-id <id>] <text>  Add milestone (auto-detects via tmux, or use --session-id)");
-        println!("  cj context [--session-id <id>]           Print context usage as 'used/total' tokens");
-        println!("  cj import            Import all tmux sessions into cj (skips ones already tracked)");
+        println!(
+            "  cj context [--session-id <id>]           Print context usage as 'used/total' tokens"
+        );
+        println!(
+            "  cj import            Import all tmux sessions into cj (skips ones already tracked)"
+        );
         println!("  cj remove <tmux>     Remove all sessions for a tmux session");
         println!("  cj hook              Process hook event from stdin (used by claude-jam.sh)");
         println!();
@@ -1239,4 +1282,511 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn fresh_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn
+    }
+
+    fn insert_session(conn: &Connection, session_id: &str, tmux: &str, status: &str) {
+        conn.execute(
+            "INSERT INTO sessions (session_id, status, tmux_session, started_at, updated_at)
+             VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            rusqlite::params![session_id, status, tmux],
+        )
+        .unwrap();
+    }
+
+    // ----- truncate_chars -----
+
+    #[test]
+    fn truncate_chars_returns_empty_when_max_zero() {
+        assert_eq!(truncate_chars("hello", 0), "");
+    }
+
+    #[test]
+    fn truncate_chars_returns_input_when_short_enough() {
+        assert_eq!(truncate_chars("hi", 10), "hi");
+        assert_eq!(truncate_chars("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_chars_adds_ellipsis_when_truncated() {
+        assert_eq!(truncate_chars("hello world", 6), "hello…");
+    }
+
+    #[test]
+    fn truncate_chars_handles_multibyte_safely() {
+        // 'я' is 2 bytes in UTF-8 — byte slicing would land mid-char and panic.
+        let s = "яяяяяя";
+        let out = truncate_chars(s, 4);
+        assert_eq!(out, "ььь…".replace('ь', "я"));
+        assert_eq!(out.chars().count(), 4);
+    }
+
+    // ----- shortcut_label -----
+
+    #[test]
+    fn shortcut_label_uses_digits_then_letters() {
+        assert_eq!(shortcut_label(0), "1");
+        assert_eq!(shortcut_label(8), "9");
+        assert_eq!(shortcut_label(9), "a");
+        assert_eq!(shortcut_label(34), "z");
+        assert_eq!(shortcut_label(35), " ");
+    }
+
+    // ----- format_context_bar -----
+
+    #[test]
+    fn format_context_bar_none_when_total_zero() {
+        assert!(format_context_bar(100, 0).is_none());
+        assert!(format_context_bar(100, -10).is_none());
+    }
+
+    #[test]
+    fn format_context_bar_color_thresholds() {
+        let (_, c) = format_context_bar(0, 200_000).unwrap();
+        assert_eq!(c, Color::Green);
+
+        let (_, c) = format_context_bar(118_000, 200_000).unwrap(); // 59%
+        assert_eq!(c, Color::Green);
+
+        let (_, c) = format_context_bar(120_000, 200_000).unwrap(); // 60%
+        assert_eq!(c, Color::Yellow);
+
+        let (_, c) = format_context_bar(158_000, 200_000).unwrap(); // 79%
+        assert_eq!(c, Color::Yellow);
+
+        let (_, c) = format_context_bar(160_000, 200_000).unwrap(); // 80%
+        assert_eq!(c, Color::Red);
+
+        let (_, c) = format_context_bar(220_000, 200_000).unwrap(); // overflow clamps
+        assert_eq!(c, Color::Red);
+    }
+
+    #[test]
+    fn format_context_bar_renders_filled_and_empty_segments() {
+        let (bar, _) = format_context_bar(100_000, 200_000).unwrap(); // 50%
+        assert!(bar.starts_with("▓▓▓▓░░░░"));
+        assert!(bar.ends_with("50%"));
+    }
+
+    #[test]
+    fn format_context_bar_clamps_overflow_to_100() {
+        let (bar, _) = format_context_bar(i64::MAX, 200_000).unwrap();
+        assert!(bar.contains("100%"));
+    }
+
+    #[test]
+    fn format_context_bar_clamps_negative_used_to_zero() {
+        let (bar, _) = format_context_bar(-50, 200_000).unwrap();
+        assert!(bar.contains("0%"));
+    }
+
+    // ----- parse_timestamp -----
+
+    #[test]
+    fn parse_timestamp_handles_sqlite_format() {
+        // 1970-01-01 00:00:00 -> 0
+        assert_eq!(parse_timestamp("1970-01-01 00:00:00"), 0);
+        // 1970-01-01 00:00:01 -> 1
+        assert_eq!(parse_timestamp("1970-01-01 00:00:01"), 1);
+        // 1970-01-02 00:00:00 -> 86400
+        assert_eq!(parse_timestamp("1970-01-02 00:00:00"), 86400);
+    }
+
+    #[test]
+    fn parse_timestamp_returns_zero_on_garbage() {
+        assert_eq!(parse_timestamp("not a date"), 0);
+        assert_eq!(parse_timestamp(""), 0);
+    }
+
+    // ----- event_to_status -----
+
+    #[test]
+    fn event_to_status_maps_known_events() {
+        assert_eq!(event_to_status("SessionStart"), "idle");
+        assert_eq!(event_to_status("UserPromptSubmit"), "working");
+        assert_eq!(event_to_status("PreToolUse"), "working");
+        assert_eq!(event_to_status("PostToolUse"), "working");
+        assert_eq!(event_to_status("Notification"), "waiting");
+        assert_eq!(event_to_status("Stop"), "idle");
+        assert_eq!(event_to_status("SessionEnd"), "offline");
+    }
+
+    #[test]
+    fn event_to_status_falls_back_to_working() {
+        assert_eq!(event_to_status("UnknownEvent"), "working");
+        assert_eq!(event_to_status(""), "working");
+    }
+
+    // ----- extract_detail -----
+
+    #[test]
+    fn extract_detail_prefers_command_then_file_then_pattern() {
+        let input = HookInput {
+            tool_input: Some(serde_json::json!({"command": "ls -la"})),
+            ..Default::default()
+        };
+        assert_eq!(extract_detail(&input), "ls -la");
+
+        let input = HookInput {
+            tool_input: Some(serde_json::json!({"file_path": "/src/foo.rs"})),
+            ..Default::default()
+        };
+        assert_eq!(extract_detail(&input), "/src/foo.rs");
+
+        let input = HookInput {
+            tool_input: Some(serde_json::json!({"pattern": "TODO"})),
+            ..Default::default()
+        };
+        assert_eq!(extract_detail(&input), "TODO");
+    }
+
+    #[test]
+    fn extract_detail_falls_back_to_prompt_then_message() {
+        let input = HookInput {
+            prompt: Some("explain this".into()),
+            ..Default::default()
+        };
+        assert_eq!(extract_detail(&input), "explain this");
+
+        let input = HookInput {
+            message: Some("waiting for input".into()),
+            ..Default::default()
+        };
+        assert_eq!(extract_detail(&input), "waiting for input");
+    }
+
+    #[test]
+    fn extract_detail_truncates_to_200_chars() {
+        let input = HookInput {
+            prompt: Some("a".repeat(500)),
+            ..Default::default()
+        };
+        assert_eq!(extract_detail(&input).chars().count(), 200);
+    }
+
+    // ----- centered_rect -----
+
+    #[test]
+    fn centered_rect_centers_within_parent() {
+        use ratatui::layout::Rect;
+        let parent = Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 40,
+        };
+        let r = centered_rect(40, 10, parent);
+        assert_eq!(r.x, 30);
+        assert_eq!(r.y, 15);
+        assert_eq!(r.width, 40);
+        assert_eq!(r.height, 10);
+    }
+
+    #[test]
+    fn centered_rect_clamps_to_parent_size() {
+        use ratatui::layout::Rect;
+        let parent = Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 5,
+        };
+        let r = centered_rect(40, 10, parent);
+        assert_eq!(r.width, 20);
+        assert_eq!(r.height, 5);
+    }
+
+    // ----- read_context_from_transcript -----
+
+    fn write_transcript(content: &str) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(f, "{}", content).unwrap();
+        f
+    }
+
+    #[test]
+    fn read_context_returns_none_for_missing_file() {
+        assert!(read_context_from_transcript("/nonexistent/path/xyz").is_none());
+    }
+
+    #[test]
+    fn read_context_returns_none_for_empty_file() {
+        let f = write_transcript("");
+        assert!(read_context_from_transcript(f.path().to_str().unwrap()).is_none());
+    }
+
+    #[test]
+    fn read_context_skips_non_assistant_entries() {
+        let content = r#"{"type":"user","message":{"role":"user","content":"hi"}}
+{"type":"system","subtype":"start"}"#;
+        let f = write_transcript(content);
+        assert!(read_context_from_transcript(f.path().to_str().unwrap()).is_none());
+    }
+
+    #[test]
+    fn read_context_uses_latest_assistant_usage() {
+        let content = r#"{"type":"assistant","message":{"usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":1000,"output_tokens":5}}}
+{"type":"assistant","message":{"usage":{"input_tokens":1,"cache_creation_input_tokens":2,"cache_read_input_tokens":50000,"output_tokens":100}}}"#;
+        let f = write_transcript(content);
+        let (used, total) = read_context_from_transcript(f.path().to_str().unwrap()).unwrap();
+        // latest line: 1 + 2 + 50000 + 100 = 50103
+        assert_eq!(used, 50103);
+        assert_eq!(total, 200_000);
+    }
+
+    #[test]
+    fn read_context_bumps_to_1m_when_over_200k() {
+        let content = r#"{"type":"assistant","message":{"usage":{"input_tokens":1,"cache_creation_input_tokens":2,"cache_read_input_tokens":300000,"output_tokens":100}}}"#;
+        let f = write_transcript(content);
+        let (used, total) = read_context_from_transcript(f.path().to_str().unwrap()).unwrap();
+        assert!(used > 200_000);
+        assert_eq!(total, 1_000_000);
+    }
+
+    #[test]
+    fn read_context_tolerates_malformed_lines() {
+        let content = "not json\n{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":42}}}\nalso not json\n";
+        let f = write_transcript(content);
+        let (used, _) = read_context_from_transcript(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(used, 42);
+    }
+
+    // ----- init_schema -----
+
+    #[test]
+    fn init_schema_creates_required_tables() {
+        let conn = fresh_db();
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(tables.contains(&"sessions".to_string()));
+        assert!(tables.contains(&"milestones".to_string()));
+    }
+
+    #[test]
+    fn init_schema_creates_context_columns() {
+        let conn = fresh_db();
+        // INSERT into context columns should succeed
+        conn.execute(
+            "INSERT INTO sessions (session_id, status, context_used, context_total) VALUES ('s1', 'idle', 100, 200)",
+            [],
+        ).unwrap();
+        let (u, t): (i64, i64) = conn
+            .query_row(
+                "SELECT context_used, context_total FROM sessions WHERE session_id='s1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((u, t), (100, 200));
+    }
+
+    // ----- db_get_context -----
+
+    #[test]
+    fn db_get_context_returns_none_when_no_row() {
+        let conn = fresh_db();
+        assert_eq!(db_get_context(&conn, "missing"), None);
+    }
+
+    #[test]
+    fn db_get_context_returns_none_when_columns_null() {
+        let conn = fresh_db();
+        insert_session(&conn, "s1", "tmux1", "working");
+        assert_eq!(db_get_context(&conn, "s1"), None);
+    }
+
+    #[test]
+    fn db_get_context_returns_value_when_populated() {
+        let conn = fresh_db();
+        conn.execute(
+            "INSERT INTO sessions (session_id, status, context_used, context_total) VALUES ('s1', 'idle', 150, 200)",
+            [],
+        ).unwrap();
+        assert_eq!(db_get_context(&conn, "s1"), Some((150, 200)));
+    }
+
+    // ----- db_import_tmux_sessions -----
+
+    #[test]
+    fn import_adds_untracked_sessions_as_pending() {
+        let conn = fresh_db();
+        let names = vec!["alpha".to_string(), "beta".to_string()];
+        let (imported, skipped) = db_import_tmux_sessions(&conn, &names);
+        assert_eq!(imported.len(), 2);
+        assert_eq!(skipped.len(), 0);
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM sessions WHERE session_id='tmux:alpha'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+    }
+
+    #[test]
+    fn import_skips_sessions_with_active_tmux_match() {
+        let conn = fresh_db();
+        insert_session(&conn, "real-uuid-1", "alpha", "working");
+        let (imported, skipped) =
+            db_import_tmux_sessions(&conn, &["alpha".to_string(), "beta".to_string()]);
+        assert_eq!(imported, vec!["beta".to_string()]);
+        assert_eq!(skipped, vec!["alpha".to_string()]);
+    }
+
+    #[test]
+    fn import_is_idempotent() {
+        let conn = fresh_db();
+        let names = vec!["alpha".to_string()];
+        db_import_tmux_sessions(&conn, &names);
+        let (imported, skipped) = db_import_tmux_sessions(&conn, &names);
+        assert_eq!(imported.len(), 0);
+        assert_eq!(skipped.len(), 1);
+    }
+
+    // ----- process_hook_event -----
+
+    #[test]
+    fn hook_ignores_input_without_session_id() {
+        let conn = fresh_db();
+        process_hook_event(&conn, r#"{"hook_event_name":"PostToolUse"}"#, "tmux1");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn hook_upserts_session_with_tool_and_status() {
+        let conn = fresh_db();
+        let payload = r#"{
+            "session_id": "abc",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Read",
+            "tool_input": {"file_path": "src/main.rs"},
+            "cwd": "/tmp"
+        }"#;
+        process_hook_event(&conn, payload, "my-tmux");
+
+        let (status, tool, detail, tmux): (String, String, String, String) = conn
+            .query_row(
+                "SELECT status, tool_name, detail, tmux_session FROM sessions WHERE session_id='abc'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "working");
+        assert_eq!(tool, "Read");
+        assert_eq!(detail, "src/main.rs");
+        assert_eq!(tmux, "my-tmux");
+    }
+
+    #[test]
+    fn hook_sets_waiting_status_on_notification() {
+        let conn = fresh_db();
+        let payload =
+            r#"{"session_id":"abc","hook_event_name":"Notification","message":"waiting"}"#;
+        process_hook_event(&conn, payload, "my-tmux");
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM sessions WHERE session_id='abc'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "waiting");
+    }
+
+    #[test]
+    fn hook_adopts_placeholder_topic_on_session_start() {
+        let conn = fresh_db();
+        // pre-create placeholder via `cj init` flow
+        conn.execute(
+            "INSERT INTO sessions (session_id, status, tmux_session, topic, started_at, updated_at)
+             VALUES ('tmux:my-tmux', 'pending', 'my-tmux', 'my goal', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            [],
+        ).unwrap();
+
+        let payload = r#"{"session_id":"real-uuid","hook_event_name":"SessionStart"}"#;
+        process_hook_event(&conn, payload, "my-tmux");
+
+        // Placeholder gone
+        let placeholder_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE session_id='tmux:my-tmux'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(placeholder_count, 0);
+
+        // Real session has the adopted topic
+        let topic: String = conn
+            .query_row(
+                "SELECT topic FROM sessions WHERE session_id='real-uuid'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(topic, "my goal");
+    }
+
+    #[test]
+    fn hook_updates_context_from_transcript() {
+        let conn = fresh_db();
+        let transcript = write_transcript(
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":1,"cache_read_input_tokens":50000,"output_tokens":10}}}"#,
+        );
+        let payload = format!(
+            r#"{{"session_id":"abc","hook_event_name":"PostToolUse","transcript_path":"{}"}}"#,
+            transcript.path().to_str().unwrap()
+        );
+        process_hook_event(&conn, &payload, "my-tmux");
+        let (used, total) = db_get_context(&conn, "abc").unwrap();
+        assert_eq!(used, 50011);
+        assert_eq!(total, 200_000);
+    }
+
+    #[test]
+    fn hook_context_total_never_decreases() {
+        let conn = fresh_db();
+        // First write — sets total to 1M
+        let t1 = write_transcript(
+            r#"{"type":"assistant","message":{"usage":{"cache_read_input_tokens":300000}}}"#,
+        );
+        let payload1 = format!(
+            r#"{{"session_id":"abc","hook_event_name":"PostToolUse","transcript_path":"{}"}}"#,
+            t1.path().to_str().unwrap()
+        );
+        process_hook_event(&conn, &payload1, "my-tmux");
+
+        // Second write — usage drops back under 200K. Total must remain 1M.
+        let t2 = write_transcript(
+            r#"{"type":"assistant","message":{"usage":{"cache_read_input_tokens":100000}}}"#,
+        );
+        let payload2 = format!(
+            r#"{{"session_id":"abc","hook_event_name":"PostToolUse","transcript_path":"{}"}}"#,
+            t2.path().to_str().unwrap()
+        );
+        process_hook_event(&conn, &payload2, "my-tmux");
+
+        let (_, total) = db_get_context(&conn, "abc").unwrap();
+        assert_eq!(total, 1_000_000);
+    }
 }
