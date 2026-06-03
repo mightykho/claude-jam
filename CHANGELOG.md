@@ -4,6 +4,15 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-06-03
+
+### Added
+- `cj setup`, `cj setup --check`, and `cj teardown` subcommands. `setup` writes the hook wrapper at `~/.claude/hooks/claude-jam.sh`, registers `cj hook` for every Claude Code lifecycle event, grants `Bash(cj:*)`, and appends the instruction line to `CLAUDE.md`. Idempotent across re-runs. `teardown` reverses every step; the database is preserved.
+- `CJ_CLAUDE_DIR` env var to override the install root (used by tests; useful for chroots and CI).
+
+### Changed
+- `install.sh` and `uninstall.sh` shrink to thin wrappers around `cj setup` / `cj teardown`. The shell scripts now only build/install the binary; all Claude Code config wiring is owned by the binary so brew, `cargo install`, and prebuilt-tarball install paths work identically.
+
 ## [0.1.1] — 2026-05-28
 
 First public release.
@@ -35,6 +44,7 @@ Initial release.
 - 44 unit + integration tests covering pure helpers, transcript parsing, and the DB layer against in-memory SQLite.
 - GitHub Actions CI matrix on Ubuntu + macOS running `cargo fmt --check`, `cargo clippy -D warnings`, and `cargo test`.
 
-[Unreleased]: https://github.com/mightykho/claude-jam/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/mightykho/claude-jam/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/mightykho/claude-jam/releases/tag/v0.1.2
 [0.1.1]: https://github.com/mightykho/claude-jam/releases/tag/v0.1.1
 [0.1.0]: https://github.com/mightykho/claude-jam/releases/tag/v0.1.0

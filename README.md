@@ -16,17 +16,28 @@ git clone https://github.com/mightykho/claude-jam && cd claude-jam
 ./install.sh
 ```
 
-If a prebuilt binary isn't present, `install.sh` will run `cargo build --release` for you (Rust toolchain required for that path).
+`install.sh` builds (or finds) the `cj` binary, drops it into `~/bin/cj`, then runs `cj setup` to wire Claude Code:
 
-The installer:
+- Hook script at `~/.claude/hooks/claude-jam.sh`
+- `cj hook` registered for every Claude Code lifecycle event in `~/.claude/settings.json`
+- `Bash(cj:*)` added to allowed permissions so Claude can run `cj` commands without prompting
+- Short instruction appended to `~/.claude/CLAUDE.md` so Claude knows to report topics and milestones
 
-- Builds and installs the `cj` binary to `~/bin/cj`
-- Creates the hook script at `~/.claude/hooks/claude-jam.sh`
-- Registers `cj hook` against every Claude Code lifecycle event in `~/.claude/settings.json`
-- Adds `Bash(cj:*)` to allowed permissions so Claude can run `cj` commands without prompting
-- Adds a short instruction to `~/.claude/CLAUDE.md` so Claude knows to report topics and milestones
+The Claude Code wiring lives inside the binary (`cj setup` / `cj teardown`), so other install channels work the same way:
 
-To uninstall, run `./uninstall.sh`. The SQLite database at `~/.claude/claude-jam.db` is preserved — delete it manually for a clean slate.
+```bash
+cargo install --git https://github.com/mightykho/claude-jam   # any host with Rust
+cj setup                                                       # finishes the wire-up
+
+# or via prebuilt tarball from the latest release:
+curl -L https://github.com/mightykho/claude-jam/releases/latest/download/cj-v0.1.2-aarch64-apple-darwin.tar.gz | tar xz
+mv cj ~/bin/   # or anywhere on PATH
+cj setup
+```
+
+`cj setup` is idempotent — safe to re-run after upgrades. `cj setup --check` reports the current wiring state without writing anything.
+
+To uninstall, run `./uninstall.sh` (or `cj teardown && rm $(which cj)` if you installed via cargo/tarball). The SQLite database at `~/.claude/claude-jam.db` is preserved — delete it manually for a clean slate.
 
 ## Usage
 
@@ -41,6 +52,8 @@ cj milestone [--session-id <id>] <text>  Add a milestone to a session
 cj context [--session-id <id>]           Print "used/total" context tokens
 cj import                                Import all current tmux sessions
 cj remove <tmux-session>                 Drop all sessions matching a tmux name
+cj setup [--check]                       Wire cj into ~/.claude (hooks, permission, instruction)
+cj teardown                              Reverse cj setup; the database is preserved
 cj hook                                  Process a hook event from stdin (used internally)
 cj -h                                    Show help
 ```

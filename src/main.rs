@@ -8,7 +8,10 @@ mod tui;
 
 use claude_jam::db::open_db;
 
-use commands::{cmd_context, cmd_hook, cmd_import, cmd_init, cmd_milestone, cmd_remove, cmd_topic};
+use commands::{
+    cmd_context, cmd_hook, cmd_import, cmd_init, cmd_milestone, cmd_remove, cmd_setup,
+    cmd_teardown, cmd_topic,
+};
 use tui::run_tui;
 
 fn print_help() {
@@ -29,6 +32,10 @@ fn print_help() {
         "  cj import            Import all tmux sessions into cj (skips ones already tracked)"
     );
     println!("  cj remove <tmux>     Remove all sessions for a tmux session");
+    println!(
+        "  cj setup [--check]   Wire cj into Claude Code (hooks, permission, CLAUDE.md). --check is read-only"
+    );
+    println!("  cj teardown          Reverse cj setup; preserves the database");
     println!("  cj hook              Process hook event from stdin (used by claude-jam.sh)");
     println!();
     println!("TUI keys:");
@@ -112,6 +119,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             cmd_context(&conn, sid_override);
         }
+        Some("setup") => {
+            let check_only = args[2..].iter().any(|a| a == "--check");
+            cmd_setup(check_only);
+        }
+        Some("teardown") => cmd_teardown(),
         _ => {
             let quit_on_select = args.iter().any(|a| a == "-q" || a == "--quit");
             let borderless = args.iter().any(|a| a == "-b" || a == "--borderless");

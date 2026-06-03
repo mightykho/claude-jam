@@ -7,5 +7,6 @@
 pub mod db;
 pub mod hook;
 pub mod models;
+pub mod setup;
 pub mod time;
 pub mod tmux;

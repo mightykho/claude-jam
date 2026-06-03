@@ -13,6 +13,7 @@ use claude_jam::db::{
     db_get_context, db_import_tmux_sessions, delete_session, find_session_by_tmux,
 };
 use claude_jam::hook::process_hook_event;
+use claude_jam::setup::{self, Action, Report};
 use claude_jam::tmux::{current_tmux_session, list_tmux_sessions};
 
 /// Translate a CLI invocation into the session_id it should target.
@@ -140,6 +141,73 @@ pub fn cmd_remove(conn: &Connection, tmux_name: &str) {
     let placeholder_id = format!("tmux:{}", tmux_name);
     delete_session(conn, &placeholder_id);
     println!("Removed {} session(s) for '{}'", ids.len(), tmux_name);
+}
+
+fn print_report(report: &Report) {
+    for action in &report.actions {
+        println!("  [{}] {}", action.glyph(), action.label());
+    }
+    if !report.changed() {
+        println!("\nNo changes needed.");
+    }
+}
+
+pub fn cmd_setup(check_only: bool) {
+    let dir = setup::default_claude_dir();
+    let result = if check_only {
+        setup::check(&dir)
+    } else {
+        setup::install(&dir)
+    };
+    match result {
+        Ok(report) => {
+            let header = if check_only {
+                format!("Claude Code setup status under {}:", dir.display())
+            } else {
+                format!("Wiring Claude Jam into {}:", dir.display())
+            };
+            println!("{header}");
+            print_report(&report);
+            if !check_only && report.changed() {
+                println!(
+                    "\nDone. Start a fresh Claude Code session and cj will begin tracking it."
+                );
+            }
+            if check_only
+                && report
+                    .actions
+                    .iter()
+                    .any(|a| matches!(a, Action::NotPresent(_)))
+            {
+                println!("\nRun `cj setup` to apply the missing items.");
+            }
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+pub fn cmd_teardown() {
+    let dir = setup::default_claude_dir();
+    match setup::uninstall(&dir) {
+        Ok(report) => {
+            println!("Removing Claude Jam wiring from {}:", dir.display());
+            print_report(&report);
+            if report.changed() {
+                println!(
+                    "\nDone. The SQLite database at {}/claude-jam.db is preserved \u{2014} \
+                     delete it manually if you want a clean slate.",
+                    dir.display()
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 pub fn cmd_hook(conn: &Connection) {

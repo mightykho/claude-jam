@@ -1,6 +1,6 @@
 [package]
 name = "claude-jam"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "A fancy tmux window switcher and TUI dashboard for modern agentic workflows"
 license = "MIT"
