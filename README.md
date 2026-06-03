@@ -11,6 +11,16 @@ Claude Jam hooks into Claude Code's lifecycle events to track what each session 
 
 ## Install
 
+### Homebrew (macOS / Linux)
+
+```bash
+brew tap mightykho/tap
+brew install claude-jam
+cj setup                     # one-time Claude Code wire-up
+```
+
+### From source
+
 ```bash
 git clone https://github.com/mightykho/claude-jam && cd claude-jam
 ./install.sh
@@ -23,11 +33,11 @@ git clone https://github.com/mightykho/claude-jam && cd claude-jam
 - `Bash(cj:*)` added to allowed permissions so Claude can run `cj` commands without prompting
 - Short instruction appended to `~/.claude/CLAUDE.md` so Claude knows to report topics and milestones
 
-The Claude Code wiring lives inside the binary (`cj setup` / `cj teardown`), so other install channels work the same way:
+The Claude Code wiring lives inside the binary (`cj setup` / `cj teardown`), so every install channel finishes with the same `cj setup` step:
 
 ```bash
 cargo install --git https://github.com/mightykho/claude-jam   # any host with Rust
-cj setup                                                       # finishes the wire-up
+cj setup
 
 # or via prebuilt tarball from the latest release:
 curl -L https://github.com/mightykho/claude-jam/releases/latest/download/cj-v0.1.2-aarch64-apple-darwin.tar.gz | tar xz
