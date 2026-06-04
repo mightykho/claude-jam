@@ -4,6 +4,12 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-06-04
+
+### Fixed
+- `cj --help`, `cj setup`, `cj setup --check`, and `cj teardown` no longer require `~/.claude/claude-jam.db` to exist or be openable. They returned `SqliteFailure(CannotOpen)` on fresh systems and inside Homebrew's sandboxed `brew test`, which made the formula's test block fail. The DB is now opened lazily, only inside the dispatch arms that actually need it.
+- `open_db()` creates the parent `~/.claude/` directory if it doesn't exist, so first-time invocations from any install channel succeed without prior `cj setup`.
+
 ## [0.1.2] — 2026-06-03
 
 ### Added
@@ -44,7 +50,8 @@ Initial release.
 - 44 unit + integration tests covering pure helpers, transcript parsing, and the DB layer against in-memory SQLite.
 - GitHub Actions CI matrix on Ubuntu + macOS running `cargo fmt --check`, `cargo clippy -D warnings`, and `cargo test`.
 
-[Unreleased]: https://github.com/mightykho/claude-jam/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/mightykho/claude-jam/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/mightykho/claude-jam/releases/tag/v0.1.3
 [0.1.2]: https://github.com/mightykho/claude-jam/releases/tag/v0.1.2
 [0.1.1]: https://github.com/mightykho/claude-jam/releases/tag/v0.1.1
 [0.1.0]: https://github.com/mightykho/claude-jam/releases/tag/v0.1.0

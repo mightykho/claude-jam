@@ -60,8 +60,16 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 
 /// Open the shared database, apply schema migrations, and clear any orphaned
 /// `tmux:<name>` placeholders left over from prior cj invocations.
+///
+/// Creates the parent directory (typically `~/.claude/`) if it doesn't exist
+/// yet, so a fresh system invocation succeeds without requiring the user to
+/// have run `cj setup` first.
 pub fn open_db() -> rusqlite::Result<Connection> {
-    let conn = Connection::open(db_path())?;
+    let path = db_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let conn = Connection::open(&path)?;
     init_schema(&conn)?;
     cleanup_orphan_placeholders(&conn);
     Ok(conn)

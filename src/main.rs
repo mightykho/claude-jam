@@ -50,12 +50,28 @@ fn print_help() {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let conn = open_db()?;
 
+    // Subcommands that must work BEFORE the database exists — fresh installs,
+    // help text, and the setup/teardown entrypoints themselves.
     if args.iter().any(|a| a == "-h" || a == "--help") {
         print_help();
         return Ok(());
     }
+    match args.get(1).map(|s| s.as_str()) {
+        Some("setup") => {
+            let check_only = args[2..].iter().any(|a| a == "--check");
+            cmd_setup(check_only);
+            return Ok(());
+        }
+        Some("teardown") => {
+            cmd_teardown();
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    // Everything below needs the database.
+    let conn = open_db()?;
 
     match args.get(1).map(|s| s.as_str()) {
         Some("hook") => cmd_hook(&conn),
@@ -119,11 +135,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             cmd_context(&conn, sid_override);
         }
-        Some("setup") => {
-            let check_only = args[2..].iter().any(|a| a == "--check");
-            cmd_setup(check_only);
-        }
-        Some("teardown") => cmd_teardown(),
         _ => {
             let quit_on_select = args.iter().any(|a| a == "-q" || a == "--quit");
             let borderless = args.iter().any(|a| a == "-b" || a == "--borderless");
