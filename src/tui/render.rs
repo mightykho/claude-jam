@@ -136,8 +136,28 @@ pub fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
             let label = shortcut_label(i);
             let mut lines = vec![];
 
-            // Title: shortcut + emoji + tmux name
+            // "You are here" — cj was launched from this tmux session.
+            let is_current = app
+                .current_tmux
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .zip(s.tmux_session.as_deref().filter(|s| !s.is_empty()))
+                .map(|(a, b)| a == b)
+                .unwrap_or(false);
+            let marker_span = if is_current {
+                Span::styled(
+                    "▸ ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::raw("  ")
+            };
+
+            // Title: marker + shortcut + emoji + tmux name
             let title_spans: Vec<Span> = vec![
+                marker_span,
                 Span::styled(format!("{} ", label), Style::default().fg(Color::Cyan)),
                 Span::styled(format!("{} ", emoji), Style::default()),
                 Span::styled(
@@ -182,7 +202,8 @@ pub fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
                     width.saturating_sub(2 + bar_width + time.chars().count() + 5)
                 } else {
                     width.saturating_sub(
-                        label.chars().count()
+                        2 // "▸ " or "  " current-session marker
+                            + label.chars().count()
                             + 2
                             + emoji.chars().count()
                             + 1

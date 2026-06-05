@@ -17,7 +17,7 @@ use rusqlite::Connection;
 
 use claude_jam::db::{delete_session, fetch_sessions};
 use claude_jam::models::Session;
-use claude_jam::tmux::switch_tmux_session;
+use claude_jam::tmux::{current_tmux_session, switch_tmux_session};
 
 use render::ui;
 
@@ -37,10 +37,13 @@ pub struct App {
     pub borderless: bool,
     /// Render each session as title-line + detail-line (`-v`).
     pub vertical: bool,
+    /// tmux session name cj was launched from, if any. Used to mark the
+    /// matching row in the dashboard with a "you are here" indicator.
+    pub current_tmux: Option<String>,
 }
 
 impl App {
-    pub fn new(borderless: bool, vertical: bool) -> Self {
+    pub fn new(borderless: bool, vertical: bool, current_tmux: Option<String>) -> Self {
         Self {
             sessions: Vec::new(),
             selected: 0,
@@ -48,6 +51,7 @@ impl App {
             pending_delete: None,
             borderless,
             vertical,
+            current_tmux,
         }
     }
 
@@ -118,7 +122,8 @@ pub fn run_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(borderless, vertical);
+    let current_tmux = current_tmux_session();
+    let mut app = App::new(borderless, vertical, current_tmux);
     app.refresh(conn);
     let mut last_tick = Instant::now();
 
