@@ -144,20 +144,28 @@ pub fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
                 .zip(s.tmux_session.as_deref().filter(|s| !s.is_empty()))
                 .map(|(a, b)| a == b)
                 .unwrap_or(false);
-            let marker_span = if is_current {
-                Span::styled(
-                    "▸ ",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Span::raw("  ")
+
+            // Edge marker — a 2-char column at the very left of every line.
+            // For the current session it's a cyan-bold "▌ " (half-block)
+            // running the full height of the entry, creating a left-edge
+            // outline. For other sessions it's plain whitespace so columns
+            // stay aligned.
+            let edge_span = || -> Span<'static> {
+                if is_current {
+                    Span::styled(
+                        "▌ ",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    Span::raw("  ")
+                }
             };
 
-            // Title: marker + shortcut + emoji + tmux name
+            // Title: edge + shortcut + emoji + tmux name
             let title_spans: Vec<Span> = vec![
-                marker_span,
+                edge_span(),
                 Span::styled(format!("{} ", label), Style::default().fg(Color::Cyan)),
                 Span::styled(format!("{} ", emoji), Style::default()),
                 Span::styled(
@@ -223,7 +231,7 @@ pub fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
 
             if app.vertical {
                 lines.push(Line::from(title_spans));
-                let mut indented: Vec<Span> = vec![Span::raw("  ")];
+                let mut indented: Vec<Span> = vec![edge_span()];
                 indented.extend(detail_spans);
                 lines.push(Line::from(indented));
             } else {
@@ -240,7 +248,8 @@ pub fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
                 let max_topic = width.saturating_sub(4);
                 let topic_display = truncate_chars(topic, max_topic);
                 lines.push(Line::from(vec![
-                    Span::styled("  │ ", Style::default().fg(Color::Gray)),
+                    edge_span(),
+                    Span::styled("│ ", Style::default().fg(Color::Gray)),
                     Span::styled(
                         topic_display,
                         Style::default()
@@ -253,15 +262,12 @@ pub fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
             // Latest milestone
             if let Some(ref ms) = latest_milestone {
                 let ms_time = relative_time(&ms.created_at);
-                let prefix = if s.topic.is_some() {
-                    "  ├ "
-                } else {
-                    "  │ "
-                };
+                let tree = if s.topic.is_some() { "├ " } else { "│ " };
                 let max_ms = width.saturating_sub(ms_time.chars().count() + 8);
                 let ms_display = truncate_chars(&ms.summary, max_ms);
                 lines.push(Line::from(vec![
-                    Span::styled(prefix, Style::default().fg(Color::Gray)),
+                    edge_span(),
+                    Span::styled(tree, Style::default().fg(Color::Gray)),
                     Span::styled("⚑ ", Style::default().fg(Color::Magenta)),
                     Span::styled(ms_display, Style::default().fg(Color::Gray)),
                     Span::styled(
@@ -278,13 +284,14 @@ pub fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
                     let ms_time = relative_time(&ms.created_at);
                     let max_ms = width.saturating_sub(ms_time.chars().count() + 10);
                     let ms_display = truncate_chars(&ms.summary, max_ms);
-                    let connector = if mi == all_milestones.len() - 1 {
-                        "  └ "
+                    let tree = if mi == all_milestones.len() - 1 {
+                        "└ "
                     } else {
-                        "  ├ "
+                        "├ "
                     };
                     lines.push(Line::from(vec![
-                        Span::styled(connector, Style::default().fg(Color::Gray)),
+                        edge_span(),
+                        Span::styled(tree, Style::default().fg(Color::Gray)),
                         Span::styled("⚑ ", Style::default().fg(Color::DarkGray)),
                         Span::styled(ms_display, Style::default().fg(Color::DarkGray)),
                         Span::styled(
@@ -295,8 +302,14 @@ pub fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
                 }
             }
 
-            // Blank line separator between sessions
-            lines.push(Line::from(""));
+            // Blank line separator between sessions. For the current session,
+            // continue the edge bar across this row too so the outline reads
+            // as a continuous vertical column.
+            if is_current {
+                lines.push(Line::from(vec![edge_span()]));
+            } else {
+                lines.push(Line::from(""));
+            }
 
             if i == app.selected {
                 ListItem::new(lines).style(Style::default().bg(Color::Black).fg(Color::White))
