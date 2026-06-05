@@ -40,7 +40,7 @@ cargo install --git https://github.com/mightykho/claude-jam   # any host with Ru
 cj setup
 
 # or via prebuilt tarball from the latest release:
-curl -L https://github.com/mightykho/claude-jam/releases/latest/download/cj-v0.1.2-aarch64-apple-darwin.tar.gz | tar xz
+curl -L https://github.com/mightykho/claude-jam/releases/latest/download/cj-v0.1.4-aarch64-apple-darwin.tar.gz | tar xz
 mv cj ~/bin/   # or anywhere on PATH
 cj setup
 ```
@@ -116,7 +116,7 @@ Each event invocation does three things:
 2. **Parses the transcript** — Claude Code passes the path to the session's JSONL transcript on every event. The hook reads it backwards to find the latest assistant message, sums `input + cache_creation + cache_read + output` tokens, and writes that to `context_used`. The `context_total` defaults to 200K and auto-bumps to 1M once observed usage exceeds 200K (this is the only reliable signal — the transcript doesn't expose the model's actual context window).
 3. **Adopts placeholders** — if you ran `cj init <topic>` or `cj import` to seed a tmux session before its real Claude session appeared, the hook detects the matching `tmux:<name>` placeholder on the next event, migrates its topic and milestones onto the real session row, and deletes the placeholder. `open_db` also runs the same cleanup pass on every cj launch so stale placeholders from earlier sessions don't pile up.
 
-The TUI is a strict reader: it polls the SQLite database once a second, never writes, and decorates the rows with status colors and a 8-cell context bar. Pressing Enter shells out to `tmux switch-client -t <name>` so the keystroke takes you straight to the session's pane.
+The TUI is a strict reader: it polls the SQLite database once a second, never writes, and decorates the rows with status colors and a 8-cell context bar. When cj is launched from inside a tmux session that matches a row in the dashboard, that row also gets a cyan-bold left-edge bar (`▌`) running its full height so you can always tell at a glance which session you came from — separate from and independent of the cursor highlight. Pressing Enter shells out to `tmux switch-client -t <name>` so the keystroke takes you straight to the session's pane.
 
 The schema is tiny — two tables (`sessions`, `milestones`) — and migrations are idempotent `ALTER TABLE ADD COLUMN` statements wrapped in `let _ =` so re-runs are no-ops. The database is local-only; no network calls anywhere in the project.
 

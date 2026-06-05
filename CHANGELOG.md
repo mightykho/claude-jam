@@ -4,6 +4,11 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-06-05
+
+### Added
+- Current-tmux-session highlight in the dashboard. When cj is launched from inside a tmux session that matches a row in the list, that row gets a cyan-bold `▌` left-edge bar running its full height — title, topic, milestone, separator. Independent of the cursor highlight, so both signals stay legible.
+
 ## [0.1.3] — 2026-06-04
 
 ### Fixed
@@ -50,7 +55,8 @@ Initial release.
 - 44 unit + integration tests covering pure helpers, transcript parsing, and the DB layer against in-memory SQLite.
 - GitHub Actions CI matrix on Ubuntu + macOS running `cargo fmt --check`, `cargo clippy -D warnings`, and `cargo test`.
 
-[Unreleased]: https://github.com/mightykho/claude-jam/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/mightykho/claude-jam/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/mightykho/claude-jam/releases/tag/v0.1.4
 [0.1.3]: https://github.com/mightykho/claude-jam/releases/tag/v0.1.3
 [0.1.2]: https://github.com/mightykho/claude-jam/releases/tag/v0.1.2
 [0.1.1]: https://github.com/mightykho/claude-jam/releases/tag/v0.1.1
