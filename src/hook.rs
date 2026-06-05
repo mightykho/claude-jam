@@ -6,8 +6,11 @@
 //! upserting the session row, parsing the transcript for context-window
 //! usage, and adopting any pending `tmux:<name>` placeholder.
 
+use std::path::Path;
+
 use rusqlite::Connection;
 
+use crate::beads;
 use crate::db::placeholder::adopt_placeholder;
 use crate::models::HookInput;
 
@@ -144,6 +147,23 @@ pub fn process_hook_event(conn: &Connection, input_str: &str, tmux_session: &str
     // so an already-running Claude session imported via `cj import` clears its
     // placeholder on the next hook fire — not only on SessionStart.
     adopt_placeholder(conn, &session_id, tmux_session);
+
+    // Beads-derived topic refresh — only on UserPromptSubmit (once per user
+    // turn) to keep the hot hook events fast. The shell-out to `bd` is gated
+    // on `active_in(cwd)` so the cost is zero outside beads projects.
+    // `topic_source = 'manual'` blocks the auto-overwrite when the user or
+    // agent explicitly called `cj topic`.
+    if event == "UserPromptSubmit" && !cwd.is_empty() {
+        if let Some(issue) = beads::current_issue(Path::new(cwd)) {
+            let _ = conn.execute(
+                "UPDATE sessions
+                 SET topic = ?1, topic_source = 'beads'
+                 WHERE session_id = ?2
+                   AND (topic_source IS NULL OR topic_source != 'manual')",
+                rusqlite::params![issue.topic_label(), session_id],
+            );
+        }
+    }
 }
 
 #[cfg(test)]

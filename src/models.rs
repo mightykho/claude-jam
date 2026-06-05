@@ -21,6 +21,10 @@ pub struct Session {
 pub struct Milestone {
     pub summary: String,
     pub created_at: String,
+    /// Optional beads issue id this milestone was recorded against (e.g.
+    /// `bd-42`), via `cj milestone --bead <id>`. `None` for free-form
+    /// milestones.
+    pub bead_ref: Option<String>,
 }
 
 /// JSON payload Claude Code passes to every lifecycle hook over stdin.

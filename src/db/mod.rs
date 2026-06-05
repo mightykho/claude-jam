@@ -55,6 +55,11 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN topic TEXT;");
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN context_used INTEGER;");
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN context_total INTEGER;");
+    // beads integration (v0.1.4+):
+    //   topic_source — 'manual' (cj topic) / 'beads' (auto from bd) / NULL
+    //   bead_ref     — optional beads issue id on each milestone
+    let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN topic_source TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE milestones ADD COLUMN bead_ref TEXT;");
     Ok(())
 }
 
@@ -106,14 +111,21 @@ pub fn fetch_sessions(conn: &Connection) -> Vec<Session> {
 }
 
 /// Most recent milestone for a given session, or `None`.
+///
+/// `id DESC` is the secondary sort so milestones recorded within the same
+/// SQLite second still come back in insertion order.
 pub fn fetch_latest_milestone(conn: &Connection, session_id: &str) -> Option<Milestone> {
     conn.query_row(
-        "SELECT summary, created_at FROM milestones WHERE session_id = ?1 ORDER BY created_at DESC LIMIT 1",
+        "SELECT summary, created_at, bead_ref FROM milestones
+         WHERE session_id = ?1
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1",
         [session_id],
         |row| {
             Ok(Milestone {
                 summary: row.get(0)?,
                 created_at: row.get(1)?,
+                bead_ref: row.get(2)?,
             })
         },
     )
@@ -123,18 +135,51 @@ pub fn fetch_latest_milestone(conn: &Connection, session_id: &str) -> Option<Mil
 /// Every milestone for a session, newest first.
 pub fn fetch_milestones(conn: &Connection, session_id: &str) -> Vec<Milestone> {
     let mut stmt = conn
-        .prepare("SELECT summary, created_at FROM milestones WHERE session_id = ?1 ORDER BY created_at DESC")
+        .prepare(
+            "SELECT summary, created_at, bead_ref FROM milestones
+             WHERE session_id = ?1
+             ORDER BY created_at DESC, id DESC",
+        )
         .unwrap();
 
     stmt.query_map([session_id], |row| {
         Ok(Milestone {
             summary: row.get(0)?,
             created_at: row.get(1)?,
+            bead_ref: row.get(2)?,
         })
     })
     .unwrap()
     .filter_map(|r| r.ok())
     .collect()
+}
+
+/// Insert a milestone, with an optional reference back to a beads issue id.
+pub fn add_milestone(
+    conn: &Connection,
+    session_id: &str,
+    summary: &str,
+    bead_ref: Option<&str>,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "INSERT INTO milestones (session_id, summary, bead_ref) VALUES (?1, ?2, ?3)",
+        rusqlite::params![session_id, summary, bead_ref],
+    )
+}
+
+/// Return the stored `cwd` for a session, if any. Used to decide which
+/// directory bd shell-outs should run against when the agent calls
+/// `cj milestone --bead <id>` from somewhere else.
+pub fn get_session_cwd(conn: &Connection, session_id: &str) -> Option<std::path::PathBuf> {
+    conn.query_row(
+        "SELECT cwd FROM sessions WHERE session_id = ?1",
+        [session_id],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+    .filter(|s| !s.is_empty())
+    .map(std::path::PathBuf::from)
 }
 
 /// Delete a session and all its milestones. Idempotent.

@@ -4,6 +4,7 @@
 //! exit-free and UI-free lives in this lib so it can be tested in isolation and
 //! reused by downstream consumers.
 
+pub mod beads;
 pub mod db;
 pub mod hook;
 pub mod models;

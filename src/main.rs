@@ -24,7 +24,8 @@ fn print_help() {
     println!("  cj -v                Vertical mode (detail line below the title)");
     println!("  cj init [-s name] <topic>  Pre-register session with topic (-s for explicit tmux session)");
     println!("  cj topic [--session-id <id>] <text>      Set topic (auto-detects via tmux, or use --session-id)");
-    println!("  cj milestone [--session-id <id>] <text>  Add milestone (auto-detects via tmux, or use --session-id)");
+    println!("  cj milestone [--session-id <id>] [--bead <bead-id>] <text>");
+    println!("                       Add milestone. --bead <id> records a beads issue reference (https://github.com/steveyegge/beads); the title is fetched via `bd show`.");
     println!(
         "  cj context [--session-id <id>]           Print context usage as 'used/total' tokens"
     );
@@ -113,18 +114,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cmd_topic(&conn, sid_override, &text);
         }
         Some("milestone") => {
-            let rest = &args[2..];
-            let (sid_override, text_args) = if rest.len() >= 2 && rest[0] == "--session-id" {
-                (Some(rest[1].as_str()), &rest[2..])
-            } else {
-                (None, rest)
-            };
-            let text = text_args.join(" ");
-            if text.is_empty() {
-                eprintln!("Usage: cj milestone [--session-id <id>] <description>");
+            // Parse leading flags (--session-id <id>, --bead <bead-id>) in any
+            // order. Everything left is the free-form milestone text (may be
+            // empty when --bead is supplied — title comes from `bd show`).
+            let mut rest = &args[2..];
+            let mut sid_override: Option<&str> = None;
+            let mut bead_id: Option<&str> = None;
+            while rest.len() >= 2 {
+                match rest[0].as_str() {
+                    "--session-id" => {
+                        sid_override = Some(rest[1].as_str());
+                        rest = &rest[2..];
+                    }
+                    "--bead" => {
+                        bead_id = Some(rest[1].as_str());
+                        rest = &rest[2..];
+                    }
+                    _ => break,
+                }
+            }
+            let text = rest.join(" ");
+            if text.is_empty() && bead_id.is_none() {
+                eprintln!(
+                    "Usage: cj milestone [--session-id <id>] [--bead <bead-id>] <description>"
+                );
                 std::process::exit(1);
             }
-            cmd_milestone(&conn, sid_override, &text);
+            cmd_milestone(&conn, sid_override, bead_id, &text);
         }
         Some("context") => {
             let rest = &args[2..];

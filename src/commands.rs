@@ -9,8 +9,10 @@ use std::io::Read as _;
 
 use rusqlite::Connection;
 
+use claude_jam::beads;
 use claude_jam::db::{
-    db_get_context, db_import_tmux_sessions, delete_session, find_session_by_tmux,
+    add_milestone, db_get_context, db_import_tmux_sessions, delete_session, find_session_by_tmux,
+    get_session_cwd,
 };
 use claude_jam::hook::process_hook_event;
 use claude_jam::setup::{self, Action, Report};
@@ -43,22 +45,57 @@ pub fn resolve_session_id(conn: &Connection, session_id_override: Option<&str>) 
 
 pub fn cmd_topic(conn: &Connection, session_id_override: Option<&str>, text: &str) {
     let session_id = resolve_session_id(conn, session_id_override);
+    // Mark topic_source='manual' so the beads-driven topic refresh in the
+    // hook path doesn't clobber a topic the user / agent set explicitly.
     conn.execute(
-        "UPDATE sessions SET topic = ?1 WHERE session_id = ?2",
+        "UPDATE sessions SET topic = ?1, topic_source = 'manual' WHERE session_id = ?2",
         rusqlite::params![text, session_id],
     )
     .unwrap();
     println!("Topic set for session {}", session_id);
 }
 
-pub fn cmd_milestone(conn: &Connection, session_id_override: Option<&str>, text: &str) {
+pub fn cmd_milestone(
+    conn: &Connection,
+    session_id_override: Option<&str>,
+    bead_id: Option<&str>,
+    text: &str,
+) {
     let session_id = resolve_session_id(conn, session_id_override);
-    conn.execute(
-        "INSERT INTO milestones (session_id, summary) VALUES (?1, ?2)",
-        rusqlite::params![session_id, text],
-    )
-    .unwrap();
-    println!("Milestone added for session {}", session_id);
+
+    let (summary, bead_ref) = if let Some(id) = bead_id {
+        // Resolve cwd: prefer the session's stored cwd (where the agent is
+        // actually working), fall back to the caller's cwd. Either should
+        // be inside the same beads project in practice.
+        let cwd = get_session_cwd(conn, &session_id)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let issue = beads::show_issue(&cwd, id);
+        let summary = match (issue, text.is_empty()) {
+            (Some(i), true) => i.title,
+            (Some(i), false) => format!("{}: {}", i.title, text),
+            (None, true) => {
+                // bd unavailable or issue missing — record bare id so the
+                // milestone still lands with a useful reference.
+                id.to_string()
+            }
+            (None, false) => text.to_string(),
+        };
+        (summary, Some(id))
+    } else {
+        if text.is_empty() {
+            eprintln!("Usage: cj milestone [--session-id <id>] [--bead <bead-id>] <text>");
+            std::process::exit(1);
+        }
+        (text.to_string(), None)
+    };
+
+    add_milestone(conn, &session_id, &summary, bead_ref).unwrap();
+    if let Some(id) = bead_ref {
+        println!("Milestone added for session {} (bd ref {})", session_id, id);
+    } else {
+        println!("Milestone added for session {}", session_id);
+    }
 }
 
 pub fn cmd_context(conn: &Connection, session_id_override: Option<&str>) {

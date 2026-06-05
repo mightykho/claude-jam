@@ -263,18 +263,30 @@ pub fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
             if let Some(ref ms) = latest_milestone {
                 let ms_time = relative_time(&ms.created_at);
                 let tree = if s.topic.is_some() { "├ " } else { "│ " };
-                let max_ms = width.saturating_sub(ms_time.chars().count() + 8);
+                let bead_prefix_chars = ms
+                    .bead_ref
+                    .as_deref()
+                    .map(|id| id.chars().count() + 3)
+                    .unwrap_or(0);
+                let max_ms = width.saturating_sub(ms_time.chars().count() + 8 + bead_prefix_chars);
                 let ms_display = truncate_chars(&ms.summary, max_ms);
-                lines.push(Line::from(vec![
+                let mut spans = vec![
                     edge_span(),
                     Span::styled(tree, Style::default().fg(Color::Gray)),
                     Span::styled("⚑ ", Style::default().fg(Color::Magenta)),
-                    Span::styled(ms_display, Style::default().fg(Color::Gray)),
-                    Span::styled(
-                        format!("  {}", ms_time),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]));
+                ];
+                if let Some(ref bd_id) = ms.bead_ref {
+                    spans.push(Span::styled(
+                        format!("{} · ", bd_id),
+                        Style::default().fg(Color::Cyan),
+                    ));
+                }
+                spans.push(Span::styled(ms_display, Style::default().fg(Color::Gray)));
+                spans.push(Span::styled(
+                    format!("  {}", ms_time),
+                    Style::default().fg(Color::DarkGray),
+                ));
+                lines.push(Line::from(spans));
             }
 
             // Expanded milestones (all except latest)
@@ -282,23 +294,39 @@ pub fn ui(frame: &mut Frame, app: &App, conn: &Connection) {
                 let all_milestones = fetch_milestones(conn, &s.session_id);
                 for (mi, ms) in all_milestones.iter().enumerate().skip(1) {
                     let ms_time = relative_time(&ms.created_at);
-                    let max_ms = width.saturating_sub(ms_time.chars().count() + 10);
+                    let bead_prefix_chars = ms
+                        .bead_ref
+                        .as_deref()
+                        .map(|id| id.chars().count() + 3)
+                        .unwrap_or(0);
+                    let max_ms =
+                        width.saturating_sub(ms_time.chars().count() + 10 + bead_prefix_chars);
                     let ms_display = truncate_chars(&ms.summary, max_ms);
                     let tree = if mi == all_milestones.len() - 1 {
                         "└ "
                     } else {
                         "├ "
                     };
-                    lines.push(Line::from(vec![
+                    let mut spans = vec![
                         edge_span(),
                         Span::styled(tree, Style::default().fg(Color::Gray)),
                         Span::styled("⚑ ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(ms_display, Style::default().fg(Color::DarkGray)),
-                        Span::styled(
-                            format!("  {}", ms_time),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                    ]));
+                    ];
+                    if let Some(ref bd_id) = ms.bead_ref {
+                        spans.push(Span::styled(
+                            format!("{} · ", bd_id),
+                            Style::default().fg(Color::Cyan),
+                        ));
+                    }
+                    spans.push(Span::styled(
+                        ms_display,
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                    spans.push(Span::styled(
+                        format!("  {}", ms_time),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                    lines.push(Line::from(spans));
                 }
             }
 

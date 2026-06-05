@@ -5,7 +5,10 @@
 use std::io::Write;
 
 use claude_jam::db::placeholder::cleanup_orphan_placeholders;
-use claude_jam::db::{db_get_context, db_import_tmux_sessions, init_schema};
+use claude_jam::db::{
+    add_milestone, db_get_context, db_import_tmux_sessions, fetch_latest_milestone,
+    fetch_milestones, init_schema,
+};
 use claude_jam::hook::process_hook_event;
 use rusqlite::Connection;
 
@@ -380,4 +383,79 @@ fn cleanup_keeps_placeholder_with_no_matching_real_session() {
         )
         .unwrap();
     assert_eq!(count, 1);
+}
+
+// ----- beads integration: milestones with bead_ref -----
+
+#[test]
+fn add_milestone_persists_bead_ref_when_supplied() {
+    let conn = fresh_db();
+    insert_session(&conn, "s1", "tmux1", "working");
+
+    add_milestone(&conn, "s1", "wire up auth", Some("bd-test-u81")).unwrap();
+    add_milestone(&conn, "s1", "free-form note", None).unwrap();
+
+    let all = fetch_milestones(&conn, "s1");
+    assert_eq!(all.len(), 2);
+    // Newest first — the free-form note was inserted second.
+    assert_eq!(all[0].summary, "free-form note");
+    assert_eq!(all[0].bead_ref, None);
+    assert_eq!(all[1].summary, "wire up auth");
+    assert_eq!(all[1].bead_ref.as_deref(), Some("bd-test-u81"));
+}
+
+#[test]
+fn fetch_latest_milestone_includes_bead_ref() {
+    let conn = fresh_db();
+    insert_session(&conn, "s1", "tmux1", "working");
+    add_milestone(&conn, "s1", "closed an issue", Some("bd-42")).unwrap();
+
+    let latest = fetch_latest_milestone(&conn, "s1").unwrap();
+    assert_eq!(latest.summary, "closed an issue");
+    assert_eq!(latest.bead_ref.as_deref(), Some("bd-42"));
+}
+
+#[test]
+fn legacy_milestones_without_bead_ref_round_trip_as_none() {
+    let conn = fresh_db();
+    insert_session(&conn, "s1", "tmux1", "working");
+    // Insert via the pre-bead_ref code path (no column listed).
+    conn.execute(
+        "INSERT INTO milestones (session_id, summary) VALUES ('s1', 'legacy entry')",
+        [],
+    )
+    .unwrap();
+
+    let latest = fetch_latest_milestone(&conn, "s1").unwrap();
+    assert_eq!(latest.summary, "legacy entry");
+    assert_eq!(latest.bead_ref, None);
+}
+
+// ----- beads integration: topic_source semantics -----
+
+#[test]
+fn hook_does_not_overwrite_manual_topic_outside_beads_project() {
+    let conn = fresh_db();
+    // Real session with a manually-set topic.
+    conn.execute(
+        "INSERT INTO sessions (session_id, status, tmux_session, topic, topic_source, started_at, updated_at)
+         VALUES ('s1', 'working', 'my-tmux', 'manual topic', 'manual', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        [],
+    )
+    .unwrap();
+
+    // UserPromptSubmit hook in a non-beads cwd should NOT touch the topic
+    // (beads short-circuits on `active_in(cwd)` returning false).
+    let payload = r#"{"session_id":"s1","hook_event_name":"UserPromptSubmit","cwd":"/tmp"}"#;
+    process_hook_event(&conn, payload, "my-tmux");
+
+    let (topic, source): (String, String) = conn
+        .query_row(
+            "SELECT topic, topic_source FROM sessions WHERE session_id='s1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(topic, "manual topic");
+    assert_eq!(source, "manual");
 }
